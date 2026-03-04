@@ -88,6 +88,18 @@ COIN_REGIME_MATRIX = {
     },
 }
 
+# Per-strategy volatility filter thresholds (calibrated on MULTI mode, 2020-2024 train, 2025-2026 validation)
+# vol_low: skip if coin_vol < threshold (too quiet, no movement)
+# vol_high: skip if coin_vol > threshold (too chaotic)
+# None = don't apply filter
+VOL_FILTER_THRESHOLDS = {
+    'ls_fade':        {'vol_low': 4.5, 'vol_high': 22.0},
+    'mean_reversion': {'vol_low': None, 'vol_high': 25.0},  # No vol_low filter - works in low vol
+    'momentum':       {'vol_low': 2.0, 'vol_high': 25.0},
+    'momentum_ls':    {'vol_low': 4.5, 'vol_high': 25.0},
+    'reversal':       {'vol_low': 7.5, 'vol_high': 21.0},
+}
+
 
 def calculate_coin_regime(candles: List[DailyCandle], target_date: datetime, lookback: int = 14) -> str:
     """
@@ -650,9 +662,8 @@ class StrategyRunner:
         day_off_pnl: Optional[float] = None,
         coin_regime_enabled: bool = False,
         coin_regime_lookback: int = 14,
-        vol_filter_enabled: bool = False,
-        vol_filter_low: float = 3.0,
-        vol_filter_high: float = 15.0,
+        vol_filter_low_enabled: bool = False,
+        vol_filter_high_enabled: bool = False,
     ) -> BacktestResult:
         """
         Backtest signals against price data.
@@ -828,30 +839,49 @@ class StrategyRunner:
                         regime_size_override = protected_size  # $1 default
                 # else FULL = use normal sizing
 
-            # VOLATILITY FILTER: skip momentum strategies in low vol, reduce mean_reversion in high vol
-            if vol_filter_enabled and coin_vol > 0:
-                # Low volatility: momentum strategies don't work without movement
-                if coin_vol < vol_filter_low and self.strategy_name in ['momentum', 'momentum_ls', 'ls_fade']:
-                    skipped_regime += 1
-                    trades.append(Trade(
-                        signal=signal,
-                        exit_date=signal.date,
-                        exit_price=signal.entry,
-                        pnl_pct=0.0,
-                        result="SKIPPED",
-                        hold_days=0,
-                        trade_status="skipped_vol_low",
-                        order_size=order_size_usd,
-                        coin_regime=coin_regime,
-                        coin_volatility=coin_vol,
-                        atr_pct=coin_vol,
-                    ))
-                    continue
-                # High volatility: mean_reversion is risky, downgrade to DYN
-                if coin_vol > vol_filter_high and self.strategy_name == 'mean_reversion':
-                    if regime_size_override is None:  # Was FULL
-                        regime_size_override = protected_size  # Downgrade to $1
-                        current_zone = 'DYN'
+            # VOLATILITY FILTER: per-strategy thresholds from VOL_FILTER_THRESHOLDS
+            if coin_vol > 0 and self.strategy_name in VOL_FILTER_THRESHOLDS:
+                strat_vol_cfg = VOL_FILTER_THRESHOLDS[self.strategy_name]
+
+                # Low volatility filter: skip if below per-strategy threshold
+                if vol_filter_low_enabled:
+                    strat_vol_low = strat_vol_cfg.get('vol_low')
+                    if strat_vol_low is not None and coin_vol < strat_vol_low:
+                        skipped_regime += 1
+                        trades.append(Trade(
+                            signal=signal,
+                            exit_date=signal.date,
+                            exit_price=signal.entry,
+                            pnl_pct=0.0,
+                            result="SKIPPED",
+                            hold_days=0,
+                            trade_status="skipped_vol_low",
+                            order_size=order_size_usd,
+                            coin_regime=coin_regime,
+                            coin_volatility=coin_vol,
+                            atr_pct=coin_vol,
+                        ))
+                        continue
+
+                # High volatility filter: skip if above per-strategy threshold
+                if vol_filter_high_enabled:
+                    strat_vol_high = strat_vol_cfg.get('vol_high')
+                    if strat_vol_high is not None and coin_vol > strat_vol_high:
+                        skipped_regime += 1
+                        trades.append(Trade(
+                            signal=signal,
+                            exit_date=signal.date,
+                            exit_price=signal.entry,
+                            pnl_pct=0.0,
+                            result="SKIPPED",
+                            hold_days=0,
+                            trade_status="skipped_vol_high",
+                            order_size=order_size_usd,
+                            coin_regime=coin_regime,
+                            coin_volatility=coin_vol,
+                            atr_pct=coin_vol,
+                        ))
+                        continue
 
             # Reset daily counter on new day
             if signal_date_str != current_day:

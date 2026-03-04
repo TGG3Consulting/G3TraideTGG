@@ -130,9 +130,8 @@ def run_all_strategies(
     day_off_pnl: Optional[float] = None,
     coin_regime_enabled: bool = False,
     coin_regime_lookback: int = 14,
-    vol_filter_enabled: bool = False,
-    vol_filter_low: float = 3.0,
-    vol_filter_high: float = 15.0,
+    vol_filter_low_enabled: bool = False,
+    vol_filter_high_enabled: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Run all strategies on given symbols and date range.
@@ -170,7 +169,12 @@ def run_all_strategies(
     if day_off_dd is not None or day_off_pnl is not None:
         print(f"Day OFF:     DD>{day_off_dd}% PnL<{day_off_pnl}%")
     print(f"Coin Regime: {'ENABLED (' + str(coin_regime_lookback) + 'd lookback)' if coin_regime_enabled else 'Disabled'}")
-    print(f"Vol Filter:  {'ENABLED (low=' + str(vol_filter_low) + '%, high=' + str(vol_filter_high) + '%)' if vol_filter_enabled else 'Disabled'}")
+    vol_filter_status = []
+    if vol_filter_low_enabled:
+        vol_filter_status.append("LOW")
+    if vol_filter_high_enabled:
+        vol_filter_status.append("HIGH")
+    print(f"Vol Filter:  {' + '.join(vol_filter_status) + ' (per-strategy thresholds)' if vol_filter_status else 'Disabled'}")
     print(f"Strategies:  {len(ALL_STRATEGIES)}")
     print("=" * 80)
     print()
@@ -250,9 +254,8 @@ def run_all_strategies(
                 day_off_pnl=day_off_pnl,
                 coin_regime_enabled=coin_regime_enabled,
                 coin_regime_lookback=coin_regime_lookback,
-                vol_filter_enabled=vol_filter_enabled,
-                vol_filter_low=vol_filter_low,
-                vol_filter_high=vol_filter_high,
+                vol_filter_low_enabled=vol_filter_low_enabled,
+                vol_filter_high_enabled=vol_filter_high_enabled,
             )
         except Exception as e:
             sys.stdout = old_stdout
@@ -458,9 +461,8 @@ Examples:
     parser.add_argument("--day-off-pnl", type=float, default=None, help="Skip days where PnL < X%% (e.g., -10)")
     parser.add_argument("--coin-regime", action="store_true", help="Enable COIN REGIME filter (based on 14d price change)")
     parser.add_argument("--coin-regime-lookback", type=int, default=14, help="Lookback days for coin regime calculation (default: 14)")
-    parser.add_argument("--vol-filter", action="store_true", help="Enable VOLATILITY filter (skip momentum in low vol, reduce mean_rev in high vol)")
-    parser.add_argument("--vol-filter-low", type=float, default=3.0, help="Low volatility threshold %% (default: 3.0)")
-    parser.add_argument("--vol-filter-high", type=float, default=15.0, help="High volatility threshold %% (default: 15.0)")
+    parser.add_argument("--vol-filter-low", action="store_true", help="Enable LOW volatility filter (uses per-strategy thresholds from VOL_FILTER_THRESHOLDS)")
+    parser.add_argument("--vol-filter-high", action="store_true", help="Enable HIGH volatility filter (uses per-strategy thresholds from VOL_FILTER_THRESHOLDS)")
 
     args = parser.parse_args()
 
@@ -518,9 +520,8 @@ Examples:
         day_off_pnl=args.day_off_pnl,
         coin_regime_enabled=args.coin_regime,
         coin_regime_lookback=args.coin_regime_lookback,
-        vol_filter_enabled=args.vol_filter,
-        vol_filter_low=args.vol_filter_low,
-        vol_filter_high=args.vol_filter_high,
+        vol_filter_low_enabled=args.vol_filter_low,
+        vol_filter_high_enabled=args.vol_filter_high,
     )
 
     # Print results
