@@ -1,0 +1,62 @@
+======================================================================
+ПОЛНЫЙ ФОРМАТ СИГНАЛА (HTML для Telegram):
+======================================================================
+
+🎯 <b>ТОРГОВЫЙ СИГНАЛ: TRUMPUSDT</b>
+📊 НАПРАВЛЕНИЕ: 🟢 <b>LONG</b>
+💰 ВЕРОЯТНОСТЬ: <b>78%</b>
+⚡ УВЕРЕННОСТЬ: 🟢 ВЫСОКАЯ
+━━━━━━━━━━━━━━━━━━━━━━━━━
+📍 <b>ВХОД:</b>
+
+Зона входа: <code>$12.50 - $12.80</code>
+Лимитный ордер: <code>$12.65</code>
+
+🛑 <b>СТОП-ЛОСС:</b> <code>$11.75</code> (-7.1%)
+🎯 <b>ТЕЙК-ПРОФИТЫ:</b>
+
+TP1: <code>$14.00</code> (+10.7%) — забрать 30%
+TP2: <code>$15.35</code> (+21.3%) — забрать 40%
+TP3: <code>$17.15</code> (+35.6%) — забрать 30%
+
+⏱ ЖДАТЬ: до 24 часов
+📈 R:R = <b>3.2</b>
+━━━━━━━━━━━━━━━━━━━━━━━━━
+📈 <b>ПОЧЕМУ LONG:</b>
+<i>Данные BinanceFriend:</i>
+
+• OI vyros +18.5% za chas (FuturesMonitor)
+• Funding: -0.025% (longi deshevye)
+• Tolpa: 62.3% v shortah (contrarian signal)
+• COORDINATED_BUYING detekciya (gruppa pokupaet)
+• Volume spike bez dvizheniya ceny (tihoe nakoplenie)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ <b>СЦЕНАРИИ:</b>
+📗 Pamp nachalsya (cena > $12.80): -> Peredvinut SL na $12.80
+📙 Bokovik > 6 chasov: -> Derzhat esli OI rastyot, inache vyjti
+📕 Otmena setapa: -> Zakryt esli OI upal -5% ili Funding > +0.05%
+━━━━━━━━━━━━━━━━━━━━━━━━━
+🔗 <b>ССЫЛКИ:</b>
+<a href="https://www.binance.com/ru/futures/TRUMPUSDT">Binance Futures</a> | 
+<a href="https://www.binance.com/ru/futures/TRUMPUSDT">Binance</a> | <a href="https://www.tradingview.com/chart/?symbol=BINANCE:TRUMPUSDT.P">TradingView</a> | <a href="https://www.coinglass.com/tv/TRUMP_USDT">CoinGlass</a>
+
+<i>Сигнал #a1b2c3d4 | 21:34:42</i>
+
+======================================================================
+КОМПАКТНЫЙ ФОРМАТ (для групп):
+======================================================================
+
+🎯 <b>TRUMPUSDT</b> 🟢 LONG
+Вход: <code>$12.65</code>
+SL: <code>$11.75</code> | TP1: <code>$14.00</code>
+Вероятность: 78% | R:R 3.2
+<i>OI vyros +18.5% za chas (FuturesMonitor)</i>
+
+======================================================================
+ПРИМЕР UPDATE (TP HIT):
+======================================================================
+
+✅ <b>TP HIT!</b> TRUMPUSDT 🟢
+Достигнут TP1 ($14.00)
+Сигнал #a1b2c3d4

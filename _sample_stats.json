@@ -1,0 +1,209 @@
+{
+  "results": [
+    {
+      "symbol": "PEPEUSDT",
+      "volume_usd": 48936061.39665427,
+      "trades": 161469,
+      "spread_pct": 0.22909507445589705,
+      "depth_usd": 1681551.41088065
+    },
+    {
+      "symbol": "SUIUSDT",
+      "volume_usd": 32387986.95932,
+      "trades": 245744,
+      "spread_pct": 0.010334315093266055,
+      "depth_usd": 808612.974255
+    },
+    {
+      "symbol": "ASTERUSDT",
+      "volume_usd": 30711225.47942,
+      "trades": 118641,
+      "spread_pct": 0.14234875444839873,
+      "depth_usd": 749174.60861
+    },
+    {
+      "symbol": "TAOUSDT",
+      "volume_usd": 28063444.88843,
+      "trades": 188946,
+      "spread_pct": 0.05245213742459708,
+      "depth_usd": 543224.47959
+    },
+    {
+      "symbol": "INITUSDT",
+      "volume_usd": 24202906.96268,
+      "trades": 223631,
+      "spread_pct": 0.08470986869970595,
+      "depth_usd": 62760.73375
+    },
+    {
+      "symbol": "ADAUSDT",
+      "volume_usd": 24181888.51904,
+      "trades": 136909,
+      "spread_pct": 0.03574620196603717,
+      "depth_usd": 1022674.6666900001
+    },
+    {
+      "symbol": "LTCUSDT",
+      "volume_usd": 19522291.79159,
+      "trades": 211097,
+      "spread_pct": 0.018233202662043962,
+      "depth_usd": 1253641.5090700001
+    },
+    {
+      "symbol": "WLFIUSDT",
+      "volume_usd": 18516246.01363,
+      "trades": 72016,
+      "spread_pct": 0.1005530417295152,
+      "depth_usd": 272230.583905
+    },
+    {
+      "symbol": "BCHUSDT",
+      "volume_usd": 18342963.854,
+      "trades": 131801,
+      "spread_pct": 0.01796783757075245,
+      "depth_usd": 514585.05045
+    },
+    {
+      "symbol": "NEARUSDT",
+      "volume_usd": 17136699.0776,
+      "trades": 73764,
+      "spread_pct": 0.0949216896060856,
+      "depth_usd": 1135193.5843500001
+    },
+    {
+      "symbol": "ORCAUSDT",
+      "volume_usd": 16917651.09406,
+      "trades": 123366,
+      "spread_pct": 0.15232292460015243,
+      "depth_usd": 43663.35517
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "volume_usd": 16261770.5166,
+      "trades": 54408,
+      "spread_pct": 0.10982976386600535,
+      "depth_usd": 903192.7815
+    },
+    {
+      "symbol": "LINKUSDT",
+      "volume_usd": 15175004.4234,
+      "trades": 47181,
+      "spread_pct": 0.11435105774728171,
+      "depth_usd": 1155443.64645
+    },
+    {
+      "symbol": "UNIUSDT",
+      "volume_usd": 12851567.08507,
+      "trades": 72118,
+      "spread_pct": 0.028421202216863263,
+      "depth_usd": 478907.39453499997
+    },
+    {
+      "symbol": "XPLUSDT",
+      "volume_usd": 12319653.06873,
+      "trades": 123454,
+      "spread_pct": 0.10178117048346347,
+      "depth_usd": 685257.567295
+    },
+    {
+      "symbol": "ENSOUSDT",
+      "volume_usd": 4220910.39905,
+      "trades": 32125,
+      "spread_pct": 0.08798944126705781,
+      "depth_usd": 69794.643985
+    },
+    {
+      "symbol": "GPSUSDT",
+      "volume_usd": 4114124.562131,
+      "trades": 48837,
+      "spread_pct": 0.15797788309637378,
+      "depth_usd": 70229.0507155
+    },
+    {
+      "symbol": "JTOUSDT",
+      "volume_usd": 4109549.97929,
+      "trades": 103970,
+      "spread_pct": 0.08447135013375263,
+      "depth_usd": 12256.672185
+    },
+    {
+      "symbol": "POLUSDT",
+      "volume_usd": 4094020.13291,
+      "trades": 36865,
+      "spread_pct": 0.09376465072667874,
+      "depth_usd": 186693.77583
+    },
+    {
+      "symbol": "BONKUSDT",
+      "volume_usd": 3979185.15306178,
+      "trades": 321314,
+      "spread_pct": 0.15420200462605868,
+      "depth_usd": 405783.44864367996
+    },
+    {
+      "symbol": "SENTUSDT",
+      "volume_usd": 3739960.37762,
+      "trades": 53053,
+      "spread_pct": 0.0455892409391365,
+      "depth_usd": 247042.252785
+    },
+    {
+      "symbol": "FETUSDT",
+      "volume_usd": 3733890.78483,
+      "trades": 33421,
+      "spread_pct": 0.05866823115284057,
+      "depth_usd": 174008.62214
+    },
+    {
+      "symbol": "LUNAUSDT",
+      "volume_usd": 3709922.358231,
+      "trades": 23043,
+      "spread_pct": 0.15325670498084729,
+      "depth_usd": 39012.4460675
+    },
+    {
+      "symbol": "TNSRUSDT",
+      "volume_usd": 3610829.78077,
+      "trades": 27382,
+      "spread_pct": 0.17746228926352428,
+      "depth_usd": 47271.88114
+    },
+    {
+      "symbol": "FTTUSDT",
+      "volume_usd": 1030763.529488,
+      "trades": 15198,
+      "spread_pct": 0.08153281695881695,
+      "depth_usd": 10342.719114
+    },
+    {
+      "symbol": "RIFUSDT",
+      "volume_usd": 1010947.1215,
+      "trades": 5591,
+      "spread_pct": 0.31695721077655425,
+      "depth_usd": 162721.9169
+    },
+    {
+      "symbol": "AIUSDT",
+      "volume_usd": 1009701.07217,
+      "trades": 18833,
+      "spread_pct": 0.41928721174003936,
+      "depth_usd": 34172.165015
+    },
+    {
+      "symbol": "JASMYUSDT",
+      "volume_usd": 1007031.835816,
+      "trades": 5627,
+      "spread_pct": 0.16625103906900185,
+      "depth_usd": 58866.600871
+    }
+  ],
+  "stats": {
+    "median_volume": 12585610.0769,
+    "median_depth": 259636.418345,
+    "median_spread": 0.09773736566780039,
+    "median_trades": 72067.0,
+    "min_depth": 10342.719114,
+    "max_depth": 1681551.41088065,
+    "count": 28
+  }
+}

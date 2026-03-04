@@ -1,0 +1,16 @@
+# GenerateHistorySignals - Dependencies
+# Install with: pip install -r requirements.txt
+
+# HTTP requests for Binance API
+requests>=2.28.0
+
+# Date parsing utilities
+python-dateutil>=2.8.0
+
+# Note: structlog is NOT required - we use print() for logging in this standalone tool
+
+# Excel export
+openpyxl>=3.1.0
+
+# Testing
+pytest>=7.0.0

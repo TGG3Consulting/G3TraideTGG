@@ -1,0 +1,883 @@
+{
+  "generated": "2026-02-23T22:50:17.344384+00:00",
+  "criteria": {
+    "source_binance": "Binance Futures USDT Perpetual",
+    "source_coinalyze": "Coinalyze with OI + L/S data",
+    "listed_before": "2024-01-01",
+    "exclusions": [
+      "ETH",
+      "AVAX",
+      "1000FLOKI",
+      "1000BONK",
+      "ETC",
+      "AAVE",
+      "WETH",
+      "LINK",
+      "1000SHIB",
+      "1000PEPE",
+      "1000LUNC",
+      "DOT",
+      "XRP",
+      "BUSD",
+      "USDP",
+      "SOL",
+      "TUSD",
+      "BNB",
+      "BTC",
+      "WBTC",
+      "FIL",
+      "ADA",
+      "FDUSD",
+      "AXS",
+      "DOGE",
+      "USDT",
+      "DAI",
+      "USDD",
+      "BCH",
+      "USDC",
+      "WBNB",
+      "NEAR"
+    ],
+    "excluded_patterns": [
+      "PAXG",
+      "GOLD",
+      "AAPL",
+      "TSLA",
+      "GOOG",
+      "AMZN",
+      "COIN",
+      "MSTR"
+    ]
+  },
+  "stats": {
+    "binance_total_after_exclusions": 516,
+    "binance_before_2024": 164,
+    "coinalyze_binance_perps": 540,
+    "intersection": 164
+  },
+  "count": 164,
+  "symbols": [
+    "RLCUSDT",
+    "KSMUSDT",
+    "NEOUSDT",
+    "RUNEUSDT",
+    "ZRXUSDT",
+    "ATOMUSDT",
+    "LRCUSDT",
+    "RSRUSDT",
+    "SUSHIUSDT",
+    "KNCUSDT",
+    "ENJUSDT",
+    "IOSTUSDT",
+    "COMPUSDT",
+    "DASHUSDT",
+    "CRVUSDT",
+    "SNXUSDT",
+    "QTUMUSDT",
+    "BATUSDT",
+    "XTZUSDT",
+    "XMRUSDT",
+    "BELUSDT",
+    "BANDUSDT",
+    "EGLDUSDT",
+    "LTCUSDT",
+    "ZENUSDT",
+    "TRBUSDT",
+    "ONTUSDT",
+    "XLMUSDT",
+    "VETUSDT",
+    "ZECUSDT",
+    "TRXUSDT",
+    "ALGOUSDT",
+    "ZILUSDT",
+    "YFIUSDT",
+    "ICXUSDT",
+    "KAVAUSDT",
+    "UNIUSDT",
+    "IOTAUSDT",
+    "STORJUSDT",
+    "THETAUSDT",
+    "SKLUSDT",
+    "GRTUSDT",
+    "1INCHUSDT",
+    "SANDUSDT",
+    "CHZUSDT",
+    "ANKRUSDT",
+    "RVNUSDT",
+    "SFPUSDT",
+    "COTIUSDT",
+    "CHRUSDT",
+    "MANAUSDT",
+    "ALICEUSDT",
+    "GTCUSDT",
+    "ONEUSDT",
+    "HBARUSDT",
+    "DENTUSDT",
+    "CELRUSDT",
+    "HOTUSDT",
+    "OGNUSDT",
+    "MTLUSDT",
+    "BTCDOMUSDT",
+    "MASKUSDT",
+    "ICPUSDT",
+    "IOTXUSDT",
+    "C98USDT",
+    "ATAUSDT",
+    "DYDXUSDT",
+    "1000XECUSDT",
+    "GALAUSDT",
+    "CELOUSDT",
+    "ARUSDT",
+    "ARPAUSDT",
+    "CTSIUSDT",
+    "LPTUSDT",
+    "ENSUSDT",
+    "PEOPLEUSDT",
+    "ROSEUSDT",
+    "DUSKUSDT",
+    "FLOWUSDT",
+    "IMXUSDT",
+    "API3USDT",
+    "GMTUSDT",
+    "APEUSDT",
+    "WOOUSDT",
+    "JASMYUSDT",
+    "OPUSDT",
+    "INJUSDT",
+    "STGUSDT",
+    "SPELLUSDT",
+    "LUNA2USDT",
+    "LDOUSDT",
+    "APTUSDT",
+    "QNTUSDT",
+    "FETUSDT",
+    "HOOKUSDT",
+    "MAGICUSDT",
+    "TUSDT",
+    "MINAUSDT",
+    "HIGHUSDT",
+    "ASTRUSDT",
+    "PHBUSDT",
+    "GMXUSDT",
+    "CFXUSDT",
+    "STXUSDT",
+    "ACHUSDT",
+    "SSVUSDT",
+    "CKBUSDT",
+    "TRUUSDT",
+    "LQTYUSDT",
+    "IDUSDT",
+    "ARBUSDT",
+    "JOEUSDT",
+    "TLMUSDT",
+    "RDNTUSDT",
+    "HFTUSDT",
+    "XVSUSDT",
+    "BLURUSDT",
+    "EDUUSDT",
+    "SUIUSDT",
+    "UMAUSDT",
+    "NMRUSDT",
+    "MAVUSDT",
+    "XVGUSDT",
+    "WLDUSDT",
+    "PENDLEUSDT",
+    "ARKMUSDT",
+    "AGLDUSDT",
+    "YGGUSDT",
+    "DODOXUSDT",
+    "BNTUSDT",
+    "OXTUSDT",
+    "SEIUSDT",
+    "CYBERUSDT",
+    "ARKUSDT",
+    "BICOUSDT",
+    "BIGTIMEUSDT",
+    "WAXPUSDT",
+    "BSVUSDT",
+    "RIFUSDT",
+    "POLYXUSDT",
+    "GASUSDT",
+    "POWRUSDT",
+    "TIAUSDT",
+    "CAKEUSDT",
+    "MEMEUSDT",
+    "TWTUSDT",
+    "ORDIUSDT",
+    "STEEMUSDT",
+    "ILVUSDT",
+    "NTRNUSDT",
+    "KASUSDT",
+    "BEAMXUSDT",
+    "PYTHUSDT",
+    "SUPERUSDT",
+    "USTCUSDT",
+    "ONGUSDT",
+    "ETHWUSDT",
+    "JTOUSDT",
+    "1000SATSUSDT",
+    "AUCTIONUSDT",
+    "1000RATSUSDT",
+    "ACEUSDT",
+    "MOVRUSDT",
+    "NFPUSDT"
+  ],
+  "symbols_with_dates": [
+    {
+      "symbol": "RLCUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "KSMUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "NEOUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "RUNEUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "ZRXUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "ATOMUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "LRCUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "RSRUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "SUSHIUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "KNCUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "ENJUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "IOSTUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "COMPUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "DASHUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "CRVUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "SNXUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "QTUMUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "BATUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "XTZUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "XMRUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "BELUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "BANDUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "EGLDUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "LTCUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "ZENUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "TRBUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "ONTUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "XLMUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "VETUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "ZECUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "TRXUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "ALGOUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "ZILUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "YFIUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "ICXUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "KAVAUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "UNIUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "IOTAUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "STORJUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "THETAUSDT",
+      "listed": "2019-09-25"
+    },
+    {
+      "symbol": "SKLUSDT",
+      "listed": "2020-08-24"
+    },
+    {
+      "symbol": "GRTUSDT",
+      "listed": "2020-12-18"
+    },
+    {
+      "symbol": "1INCHUSDT",
+      "listed": "2020-12-25"
+    },
+    {
+      "symbol": "SANDUSDT",
+      "listed": "2021-01-18"
+    },
+    {
+      "symbol": "CHZUSDT",
+      "listed": "2021-01-21"
+    },
+    {
+      "symbol": "ANKRUSDT",
+      "listed": "2021-01-25"
+    },
+    {
+      "symbol": "RVNUSDT",
+      "listed": "2021-02-23"
+    },
+    {
+      "symbol": "SFPUSDT",
+      "listed": "2021-02-24"
+    },
+    {
+      "symbol": "COTIUSDT",
+      "listed": "2021-03-09"
+    },
+    {
+      "symbol": "CHRUSDT",
+      "listed": "2021-03-12"
+    },
+    {
+      "symbol": "MANAUSDT",
+      "listed": "2021-03-14"
+    },
+    {
+      "symbol": "ALICEUSDT",
+      "listed": "2021-03-15"
+    },
+    {
+      "symbol": "GTCUSDT",
+      "listed": "2021-03-15"
+    },
+    {
+      "symbol": "ONEUSDT",
+      "listed": "2021-03-17"
+    },
+    {
+      "symbol": "HBARUSDT",
+      "listed": "2021-03-17"
+    },
+    {
+      "symbol": "DENTUSDT",
+      "listed": "2021-03-23"
+    },
+    {
+      "symbol": "CELRUSDT",
+      "listed": "2021-03-29"
+    },
+    {
+      "symbol": "HOTUSDT",
+      "listed": "2021-03-30"
+    },
+    {
+      "symbol": "OGNUSDT",
+      "listed": "2021-03-31"
+    },
+    {
+      "symbol": "MTLUSDT",
+      "listed": "2021-03-31"
+    },
+    {
+      "symbol": "BTCDOMUSDT",
+      "listed": "2021-06-17"
+    },
+    {
+      "symbol": "MASKUSDT",
+      "listed": "2021-07-16"
+    },
+    {
+      "symbol": "ICPUSDT",
+      "listed": "2021-07-30"
+    },
+    {
+      "symbol": "IOTXUSDT",
+      "listed": "2021-08-11"
+    },
+    {
+      "symbol": "C98USDT",
+      "listed": "2021-08-23"
+    },
+    {
+      "symbol": "ATAUSDT",
+      "listed": "2021-08-30"
+    },
+    {
+      "symbol": "DYDXUSDT",
+      "listed": "2021-09-09"
+    },
+    {
+      "symbol": "1000XECUSDT",
+      "listed": "2021-09-16"
+    },
+    {
+      "symbol": "GALAUSDT",
+      "listed": "2021-09-17"
+    },
+    {
+      "symbol": "CELOUSDT",
+      "listed": "2021-09-26"
+    },
+    {
+      "symbol": "ARUSDT",
+      "listed": "2021-09-28"
+    },
+    {
+      "symbol": "ARPAUSDT",
+      "listed": "2021-10-18"
+    },
+    {
+      "symbol": "CTSIUSDT",
+      "listed": "2021-10-25"
+    },
+    {
+      "symbol": "LPTUSDT",
+      "listed": "2021-11-10"
+    },
+    {
+      "symbol": "ENSUSDT",
+      "listed": "2021-11-29"
+    },
+    {
+      "symbol": "PEOPLEUSDT",
+      "listed": "2021-12-23"
+    },
+    {
+      "symbol": "ROSEUSDT",
+      "listed": "2021-12-31"
+    },
+    {
+      "symbol": "DUSKUSDT",
+      "listed": "2022-01-06"
+    },
+    {
+      "symbol": "FLOWUSDT",
+      "listed": "2022-02-09"
+    },
+    {
+      "symbol": "IMXUSDT",
+      "listed": "2022-02-10"
+    },
+    {
+      "symbol": "API3USDT",
+      "listed": "2022-02-21"
+    },
+    {
+      "symbol": "GMTUSDT",
+      "listed": "2022-03-14"
+    },
+    {
+      "symbol": "APEUSDT",
+      "listed": "2022-03-17"
+    },
+    {
+      "symbol": "WOOUSDT",
+      "listed": "2022-04-07"
+    },
+    {
+      "symbol": "JASMYUSDT",
+      "listed": "2022-04-19"
+    },
+    {
+      "symbol": "OPUSDT",
+      "listed": "2022-06-01"
+    },
+    {
+      "symbol": "INJUSDT",
+      "listed": "2022-08-16"
+    },
+    {
+      "symbol": "STGUSDT",
+      "listed": "2022-08-24"
+    },
+    {
+      "symbol": "SPELLUSDT",
+      "listed": "2022-09-05"
+    },
+    {
+      "symbol": "LUNA2USDT",
+      "listed": "2022-09-09"
+    },
+    {
+      "symbol": "LDOUSDT",
+      "listed": "2022-09-21"
+    },
+    {
+      "symbol": "APTUSDT",
+      "listed": "2022-10-18"
+    },
+    {
+      "symbol": "QNTUSDT",
+      "listed": "2022-10-18"
+    },
+    {
+      "symbol": "FETUSDT",
+      "listed": "2023-01-15"
+    },
+    {
+      "symbol": "HOOKUSDT",
+      "listed": "2023-01-19"
+    },
+    {
+      "symbol": "MAGICUSDT",
+      "listed": "2023-01-23"
+    },
+    {
+      "symbol": "TUSDT",
+      "listed": "2023-01-31"
+    },
+    {
+      "symbol": "MINAUSDT",
+      "listed": "2023-02-03"
+    },
+    {
+      "symbol": "HIGHUSDT",
+      "listed": "2023-02-03"
+    },
+    {
+      "symbol": "ASTRUSDT",
+      "listed": "2023-02-13"
+    },
+    {
+      "symbol": "PHBUSDT",
+      "listed": "2023-02-15"
+    },
+    {
+      "symbol": "GMXUSDT",
+      "listed": "2023-02-16"
+    },
+    {
+      "symbol": "CFXUSDT",
+      "listed": "2023-02-19"
+    },
+    {
+      "symbol": "STXUSDT",
+      "listed": "2023-02-20"
+    },
+    {
+      "symbol": "ACHUSDT",
+      "listed": "2023-02-21"
+    },
+    {
+      "symbol": "SSVUSDT",
+      "listed": "2023-02-23"
+    },
+    {
+      "symbol": "CKBUSDT",
+      "listed": "2023-02-27"
+    },
+    {
+      "symbol": "TRUUSDT",
+      "listed": "2023-03-06"
+    },
+    {
+      "symbol": "LQTYUSDT",
+      "listed": "2023-03-08"
+    },
+    {
+      "symbol": "IDUSDT",
+      "listed": "2023-03-23"
+    },
+    {
+      "symbol": "ARBUSDT",
+      "listed": "2023-03-23"
+    },
+    {
+      "symbol": "JOEUSDT",
+      "listed": "2023-03-28"
+    },
+    {
+      "symbol": "TLMUSDT",
+      "listed": "2023-03-29"
+    },
+    {
+      "symbol": "RDNTUSDT",
+      "listed": "2023-04-04"
+    },
+    {
+      "symbol": "HFTUSDT",
+      "listed": "2023-04-05"
+    },
+    {
+      "symbol": "XVSUSDT",
+      "listed": "2023-04-12"
+    },
+    {
+      "symbol": "BLURUSDT",
+      "listed": "2023-04-27"
+    },
+    {
+      "symbol": "EDUUSDT",
+      "listed": "2023-04-28"
+    },
+    {
+      "symbol": "SUIUSDT",
+      "listed": "2023-05-03"
+    },
+    {
+      "symbol": "UMAUSDT",
+      "listed": "2023-05-09"
+    },
+    {
+      "symbol": "NMRUSDT",
+      "listed": "2023-06-22"
+    },
+    {
+      "symbol": "MAVUSDT",
+      "listed": "2023-06-29"
+    },
+    {
+      "symbol": "XVGUSDT",
+      "listed": "2023-07-05"
+    },
+    {
+      "symbol": "WLDUSDT",
+      "listed": "2023-07-24"
+    },
+    {
+      "symbol": "PENDLEUSDT",
+      "listed": "2023-07-28"
+    },
+    {
+      "symbol": "ARKMUSDT",
+      "listed": "2023-07-28"
+    },
+    {
+      "symbol": "AGLDUSDT",
+      "listed": "2023-07-29"
+    },
+    {
+      "symbol": "YGGUSDT",
+      "listed": "2023-08-05"
+    },
+    {
+      "symbol": "DODOXUSDT",
+      "listed": "2023-08-08"
+    },
+    {
+      "symbol": "BNTUSDT",
+      "listed": "2023-08-10"
+    },
+    {
+      "symbol": "OXTUSDT",
+      "listed": "2023-08-11"
+    },
+    {
+      "symbol": "SEIUSDT",
+      "listed": "2023-08-17"
+    },
+    {
+      "symbol": "CYBERUSDT",
+      "listed": "2023-08-21"
+    },
+    {
+      "symbol": "ARKUSDT",
+      "listed": "2023-09-19"
+    },
+    {
+      "symbol": "BICOUSDT",
+      "listed": "2023-09-28"
+    },
+    {
+      "symbol": "BIGTIMEUSDT",
+      "listed": "2023-10-12"
+    },
+    {
+      "symbol": "WAXPUSDT",
+      "listed": "2023-10-18"
+    },
+    {
+      "symbol": "BSVUSDT",
+      "listed": "2023-10-20"
+    },
+    {
+      "symbol": "RIFUSDT",
+      "listed": "2023-10-21"
+    },
+    {
+      "symbol": "POLYXUSDT",
+      "listed": "2023-10-25"
+    },
+    {
+      "symbol": "GASUSDT",
+      "listed": "2023-10-25"
+    },
+    {
+      "symbol": "POWRUSDT",
+      "listed": "2023-10-27"
+    },
+    {
+      "symbol": "TIAUSDT",
+      "listed": "2023-10-31"
+    },
+    {
+      "symbol": "CAKEUSDT",
+      "listed": "2023-11-02"
+    },
+    {
+      "symbol": "MEMEUSDT",
+      "listed": "2023-11-03"
+    },
+    {
+      "symbol": "TWTUSDT",
+      "listed": "2023-11-03"
+    },
+    {
+      "symbol": "ORDIUSDT",
+      "listed": "2023-11-07"
+    },
+    {
+      "symbol": "STEEMUSDT",
+      "listed": "2023-11-08"
+    },
+    {
+      "symbol": "ILVUSDT",
+      "listed": "2023-11-10"
+    },
+    {
+      "symbol": "NTRNUSDT",
+      "listed": "2023-11-14"
+    },
+    {
+      "symbol": "KASUSDT",
+      "listed": "2023-11-17"
+    },
+    {
+      "symbol": "BEAMXUSDT",
+      "listed": "2023-11-17"
+    },
+    {
+      "symbol": "PYTHUSDT",
+      "listed": "2023-11-22"
+    },
+    {
+      "symbol": "SUPERUSDT",
+      "listed": "2023-11-26"
+    },
+    {
+      "symbol": "USTCUSDT",
+      "listed": "2023-11-27"
+    },
+    {
+      "symbol": "ONGUSDT",
+      "listed": "2023-11-27"
+    },
+    {
+      "symbol": "ETHWUSDT",
+      "listed": "2023-11-28"
+    },
+    {
+      "symbol": "JTOUSDT",
+      "listed": "2023-12-08"
+    },
+    {
+      "symbol": "1000SATSUSDT",
+      "listed": "2023-12-12"
+    },
+    {
+      "symbol": "AUCTIONUSDT",
+      "listed": "2023-12-15"
+    },
+    {
+      "symbol": "1000RATSUSDT",
+      "listed": "2023-12-15"
+    },
+    {
+      "symbol": "ACEUSDT",
+      "listed": "2023-12-18"
+    },
+    {
+      "symbol": "MOVRUSDT",
+      "listed": "2023-12-26"
+    },
+    {
+      "symbol": "NFPUSDT",
+      "listed": "2023-12-27"
+    }
+  ]
+}

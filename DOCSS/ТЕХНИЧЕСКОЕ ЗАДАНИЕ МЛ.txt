@@ -1,0 +1,772 @@
+ТЕХНИЧЕСКОЕ ЗАДАНИЕ: ML-СИСТЕМА ОПТИМИЗАЦИИ ТОРГОВЫХ СИГНАЛОВ
+1. ЦЕЛЬ ПРОЕКТА
+Создать ML-систему которая:
+1.	Анализирует исторические данные и результаты бэктестов
+2.	Оптимизирует параметры сигналов (Entry, SL, TP, Lifetime) для максимизации прибыли
+3.	Выявляет паттерны рынка которые предшествуют успешным/неуспешным сделкам
+4.	Генерирует улучшенную логику для будущих сигналов
+5.	Управляет риском и капиталом (Risk Management + Money Management)
+________________________________________
+2. ВХОДНЫЕ ДАННЫЕ
+2.1 Данные из BinanceFriend (уже собираются)
+Категория	Данные	Источник
+Цена	OHLCV (1m, 5m, 15m, 1h, 4h)	Binance Klines API
+Объём	Volume, Volume MA, Volume Ratio	RealTimeMonitor
+Open Interest	OI текущий, OI change 1h/5m, OI history	FuturesMonitor
+Funding	Funding Rate, Funding History, Funding Gradient	FuturesMonitor
+Long/Short Ratio	L/S Ratio, L/S History	FuturesMonitor
+Orderbook	Bid/Ask Volume, Imbalance, Spread	RealTimeMonitor
+Trades	Trade Count, Buy/Sell Ratio, Large Trades	RealTimeMonitor
+Cross-Exchange	Price Spread, Volume Correlation, OI Migration	StateStore
+Детекции	Тип детекции, Score, Severity, Evidence	DetectionEngine
+2.2 Данные сигнала (что оптимизируем)
+Параметр	Текущее значение	Что оптимизирует ML
+Direction	LONG/SHORT	Подтверждение или отмена
+Entry Price	Текущая цена ± %	Оптимальная точка входа
+Entry Zone	Low - High	Ширина зоны входа
+Stop Loss	Фиксированный %	Динамический SL на основе волатильности и уровней
+Take Profit 1	Фиксированный %	Оптимальный TP1
+Take Profit 2	Фиксированный %	Оптимальный TP2
+Take Profit 3	Фиксированный %	Оптимальный TP3
+TP Distribution	30/40/30	Оптимальное распределение
+Lifetime	24 часа	Оптимальное время жизни сигнала
+Confidence	Score 0-100	Калиброванная вероятность
+2.3 Данные из бэктестера (результаты)
+Поле	Описание
+signal_id	ID сигнала
+entry_filled	Вошли ли в позицию
+actual_entry_price	Реальная цена входа
+actual_entry_time	Время входа
+exit_reason	TP1/TP2/TP3/SL/TIMEOUT
+exit_price	Цена выхода
+exit_time	Время выхода
+pnl_percent	PnL в %
+pnl_with_fees	PnL с учётом комиссий
+max_drawdown	Максимальная просадка во время сделки
+max_profit	Максимальная прибыль во время сделки
+hold_time_hours	Время удержания
+tp1_hit, tp2_hit, tp3_hit	Какие TP сработали
+________________________________________
+3. АРХИТЕКТУРА ML-СИСТЕМЫ
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         ML OPTIMIZATION PIPELINE                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│   HISTORICAL │    │   FEATURE    │    │    MODEL     │    │   SIGNAL     │
+│     DATA     │───▶│  ENGINEERING │───▶│   TRAINING   │───▶│  OPTIMIZER   │
+│   COLLECTOR  │    │              │    │              │    │              │
+└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+       │                   │                   │                   │
+       ▼                   ▼                   ▼                   ▼
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│ • Klines     │    │ • Technical  │    │ • XGBoost    │    │ • Entry Zone │
+│ • OI History │    │   Indicators │    │ • LightGBM   │    │ • SL/TP Opt  │
+│ • Funding    │    │ • Market     │    │ • Neural Net │    │ • Lifetime   │
+│ • Orderbook  │    │   Regime     │    │ • Ensemble   │    │ • Confidence │
+│ • Trades     │    │ • Volatility │    │              │    │              │
+│ • Backtest   │    │ • Momentum   │    │              │    │              │
+└──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+                                               │
+                                               ▼
+                    ┌─────────────────────────────────────────────────────┐
+                    │              RISK & MONEY MANAGEMENT                 │
+                    ├─────────────────────────────────────────────────────┤
+                    │ • Position Sizing (Kelly Criterion / Fixed %)       │
+                    │ • Max Drawdown Control                               │
+                    │ • Correlation Filter (не открывать коррелир. позиции)│
+                    │ • Daily/Weekly Loss Limits                           │
+                    │ • Exposure Limits (макс % капитала в рынке)          │
+                    └─────────────────────────────────────────────────────┘
+                                               │
+                                               ▼
+                              ┌─────────────────────────────┐
+                              │     OPTIMIZED SIGNAL        │
+                              │ • Direction (подтверждён)   │
+                              │ • Entry Zone (оптимизирован)│
+                              │ • SL (динамический)         │
+                              │ • TP1/TP2/TP3 (оптимизир.)  │
+                              │ • Lifetime (оптимизирован)  │
+                              │ • Position Size (рассчитан) │
+                              │ • Confidence (калиброван)   │
+                              └─────────────────────────────┘
+________________________________________
+4. КОМПОНЕНТЫ СИСТЕМЫ
+4.1 Historical Data Collector
+Файл: src/ml/data_collector.py
+Функции:
+•	Сбор всех исторических данных для символа за период
+•	Синхронизация данных из разных источников по timestamp
+•	Сохранение в единый формат для обучения
+python
+@dataclass
+class TrainingDataPoint:
+    """Одна точка данных для обучения."""
+    timestamp: datetime
+    symbol: str
+    
+    # Рыночные данные (на момент сигнала)
+    price: Decimal
+    volume_1h: Decimal
+    volume_ratio: float  # vs средний
+    
+    # OI данные
+    oi: Decimal
+    oi_change_1h: float
+    oi_change_5m: float
+    
+    # Funding
+    funding_rate: float
+    funding_gradient: float  # изменение за 24ч
+    
+    # L/S Ratio
+    long_ratio: float
+    short_ratio: float
+    
+    # Orderbook
+    bid_volume: Decimal
+    ask_volume: Decimal
+    book_imbalance: float
+    spread_pct: float
+    
+    # Волатильность
+    atr_1h: float
+    atr_24h: float
+    volatility_regime: str  # LOW/MEDIUM/HIGH/EXTREME
+    
+    # Технические индикаторы
+    rsi_14: float
+    macd_signal: float
+    bb_position: float  # позиция в Bollinger Bands (0-1)
+    
+    # Детекция
+    detection_type: str
+    detection_score: int
+    detection_severity: str
+    
+    # Cross-exchange
+    price_spread_max: float
+    volume_correlation: float
+    oi_migration_score: float
+    
+    # Результат (из бэктеста)
+    signal_direction: str
+    entry_price: Decimal
+    stop_loss: Decimal
+    take_profit_1: Decimal
+    take_profit_2: Decimal
+    take_profit_3: Decimal
+    lifetime_hours: int
+    
+    # Outcome
+    pnl_percent: float
+    exit_reason: str
+    max_drawdown: float
+    max_profit: float
+    hold_time: float
+4.2 Feature Engineering
+Файл: src/ml/feature_engineering.py
+Фичи для модели:
+python
+FEATURES = {
+    # Ценовые фичи
+    "price_change_1h": "Изменение цены за час",
+    "price_change_4h": "Изменение цены за 4 часа",
+    "price_change_24h": "Изменение цены за 24 часа",
+    "price_vs_vwap": "Цена относительно VWAP",
+    "price_vs_ema_20": "Цена относительно EMA20",
+    
+    # Объёмные фичи
+    "volume_ratio_1h": "Объём vs средний за час",
+    "volume_ratio_24h": "Объём vs средний за 24ч",
+    "buy_volume_ratio": "Доля покупок в объёме",
+    "large_trades_ratio": "Доля крупных сделок",
+    
+    # OI фичи
+    "oi_change_1h": "Изменение OI за час",
+    "oi_change_5m": "Изменение OI за 5 мин",
+    "oi_price_divergence": "Дивергенция OI и цены",
+    "oi_acceleration": "Ускорение изменения OI",
+    
+    # Funding фичи
+    "funding_rate": "Текущий funding",
+    "funding_vs_avg": "Funding vs средний",
+    "funding_gradient": "Скорость изменения funding",
+    "funding_extreme": "Экстремальность funding (0-1)",
+    
+    # L/S фичи
+    "ls_ratio": "Long/Short ratio",
+    "ls_ratio_change": "Изменение L/S за 4ч",
+    "crowd_positioning": "Позиционирование толпы (-1 to 1)",
+    
+    # Orderbook фичи
+    "book_imbalance": "Дисбаланс стакана",
+    "spread_pct": "Спред в %",
+    "bid_wall_detected": "Обнаружена bid wall",
+    "ask_wall_detected": "Обнаружена ask wall",
+    
+    # Волатильность
+    "atr_ratio": "ATR текущий vs исторический",
+    "volatility_regime": "Режим волатильности (encoded)",
+    "bb_width": "Ширина Bollinger Bands",
+    
+    # Технические
+    "rsi_14": "RSI 14",
+    "macd_histogram": "MACD гистограмма",
+    "trend_strength": "Сила тренда (ADX)",
+    
+    # Cross-exchange
+    "price_spread_max": "Макс спред между биржами",
+    "volume_correlation": "Корреляция объёмов",
+    "oi_migration": "Миграция OI между биржами",
+    
+    # Детекция
+    "detection_score": "Score детекции",
+    "detection_type_encoded": "Тип детекции (encoded)",
+    "time_since_last_detection": "Время с последней детекции",
+    
+    # Временные
+    "hour_of_day": "Час дня (циклический)",
+    "day_of_week": "День недели (циклический)",
+    "is_funding_hour": "Час funding payment",
+}
+4.3 Model Training
+Файл: src/ml/model_trainer.py
+Модели:
+1.	Direction Classifier — подтверждение направления LONG/SHORT
+2.	SL Regressor — оптимальный Stop Loss
+3.	TP Regressor — оптимальные Take Profits
+4.	Lifetime Regressor — оптимальное время жизни
+5.	Confidence Calibrator — калибровка вероятности
+python
+class MLModelSuite:
+    """Набор ML моделей для оптимизации сигналов."""
+    
+    def __init__(self):
+        # Классификатор направления
+        self.direction_model = XGBClassifier(
+            objective='binary:logistic',
+            n_estimators=100,
+            max_depth=6,
+            learning_rate=0.1
+        )
+        
+        # Регрессоры для уровней
+        self.sl_model = XGBRegressor(objective='reg:squarederror')
+        self.tp1_model = XGBRegressor(objective='reg:squarederror')
+        self.tp2_model = XGBRegressor(objective='reg:squarederror')
+        self.tp3_model = XGBRegressor(objective='reg:squarederror')
+        
+        # Регрессор времени жизни
+        self.lifetime_model = XGBRegressor(objective='reg:squarederror')
+        
+        # Калибратор вероятности
+        self.confidence_calibrator = CalibratedClassifierCV(
+            self.direction_model, method='isotonic'
+        )
+    
+    def train(self, X: pd.DataFrame, y: dict):
+        """
+        Обучить все модели.
+        
+        y = {
+            'direction': [1, 0, 1, ...],  # 1=profit, 0=loss
+            'optimal_sl': [0.02, 0.03, ...],  # оптимальный SL в %
+            'optimal_tp1': [0.05, 0.04, ...],
+            'optimal_tp2': [0.10, 0.08, ...],
+            'optimal_tp3': [0.20, 0.15, ...],
+            'optimal_lifetime': [12, 24, ...],  # часы
+        }
+        """
+        ...
+    
+    def predict(self, X: pd.DataFrame) -> dict:
+        """Предсказать оптимальные параметры."""
+        return {
+            'direction_confidence': self.confidence_calibrator.predict_proba(X),
+            'optimal_sl': self.sl_model.predict(X),
+            'optimal_tp1': self.tp1_model.predict(X),
+            'optimal_tp2': self.tp2_model.predict(X),
+            'optimal_tp3': self.tp3_model.predict(X),
+            'optimal_lifetime': self.lifetime_model.predict(X),
+        }
+4.4 Signal Optimizer
+Файл: src/ml/signal_optimizer.py
+python
+class SignalOptimizer:
+    """Оптимизатор параметров сигнала на основе ML."""
+    
+    def __init__(self, model_suite: MLModelSuite):
+        self.models = model_suite
+    
+    def optimize_signal(
+        self, 
+        original_signal: TradeSignal,
+        market_data: MarketSnapshot
+    ) -> OptimizedSignal:
+        """
+        Оптимизировать сигнал.
+        
+        1. Извлечь фичи из market_data
+        2. Получить предсказания от моделей
+        3. Применить ограничения (мин SL, макс TP, etc.)
+        4. Рассчитать размер позиции
+        5. Вернуть оптимизированный сигнал
+        """
+        
+        # 1. Feature extraction
+        features = self.feature_engineer.extract(market_data)
+        
+        # 2. ML predictions
+        predictions = self.models.predict(features)
+        
+        # 3. Validate direction
+        if predictions['direction_confidence'] < 0.55:
+            return None  # Отменить сигнал
+        
+        # 4. Calculate optimal levels
+        entry_price = original_signal.entry_price
+        atr = market_data.atr_1h
+        
+        # SL: ML предсказание + ограничения
+        sl_pct = predictions['optimal_sl']
+        sl_pct = max(sl_pct, atr * 1.5)  # Минимум 1.5 ATR
+        sl_pct = min(sl_pct, 0.10)        # Максимум 10%
+        
+        if original_signal.direction == Direction.LONG:
+            stop_loss = entry_price * (1 - sl_pct)
+        else:
+            stop_loss = entry_price * (1 + sl_pct)
+        
+        # TP: ML предсказания
+        tp1 = entry_price * (1 + predictions['optimal_tp1'])
+        tp2 = entry_price * (1 + predictions['optimal_tp2'])
+        tp3 = entry_price * (1 + predictions['optimal_tp3'])
+        
+        # 5. Lifetime
+        lifetime = int(predictions['optimal_lifetime'])
+        lifetime = max(4, min(lifetime, 48))  # 4-48 часов
+        
+        # 6. Position size (будет рассчитан в Risk Manager)
+        
+        return OptimizedSignal(
+            original=original_signal,
+            direction=original_signal.direction,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit_1=tp1,
+            take_profit_2=tp2,
+            take_profit_3=tp3,
+            lifetime_hours=lifetime,
+            ml_confidence=predictions['direction_confidence'],
+        )
+4.5 Risk & Money Management
+Файл: src/ml/risk_manager.py
+python
+@dataclass
+class RiskConfig:
+    """Конфигурация риск-менеджмента."""
+    
+    # Position Sizing
+    risk_per_trade_pct: float = 1.0      # Риск на сделку (% от капитала)
+    max_position_pct: float = 10.0        # Макс размер позиции (% от капитала)
+    
+    # Kelly Criterion
+    use_kelly: bool = True
+    kelly_fraction: float = 0.25          # Доля от Kelly (консервативно)
+    
+    # Drawdown Control
+    max_daily_loss_pct: float = 3.0       # Макс дневной убыток
+    max_weekly_loss_pct: float = 7.0      # Макс недельный убыток
+    max_total_drawdown_pct: float = 15.0  # Макс общая просадка
+    
+    # Exposure Limits
+    max_open_positions: int = 5           # Макс открытых позиций
+    max_correlated_positions: int = 2     # Макс коррелированных позиций
+    max_exposure_pct: float = 30.0        # Макс % капитала в рынке
+    
+    # Per-Symbol Limits
+    max_position_per_symbol_pct: float = 5.0  # Макс на один символ
+
+
+class RiskManager:
+    """Управление рисками и капиталом."""
+    
+    def __init__(self, config: RiskConfig, initial_capital: Decimal):
+        self.config = config
+        self.initial_capital = initial_capital
+        self.current_capital = initial_capital
+        
+        self.open_positions: list[Position] = []
+        self.daily_pnl: Decimal = Decimal("0")
+        self.weekly_pnl: Decimal = Decimal("0")
+    
+    def calculate_position_size(
+        self,
+        signal: OptimizedSignal,
+        current_price: Decimal
+    ) -> PositionSize | None:
+        """
+        Рассчитать размер позиции.
+        
+        Методы:
+        1. Fixed % Risk — риск фиксированный % от капитала
+        2. Kelly Criterion — оптимальный размер на основе win rate и R:R
+        """
+        
+        # Проверить лимиты
+        if not self._check_limits(signal):
+            return None
+        
+        # Рассчитать риск в деньгах
+        risk_amount = self.current_capital * Decimal(str(self.config.risk_per_trade_pct / 100))
+        
+        # Рассчитать размер на основе SL
+        sl_distance = abs(signal.entry_price - signal.stop_loss)
+        sl_pct = sl_distance / signal.entry_price
+        
+        # Position size = Risk / SL distance
+        position_value = risk_amount / sl_pct
+        
+        # Kelly adjustment (если включён)
+        if self.config.use_kelly:
+            kelly_size = self._calculate_kelly(signal)
+            position_value = min(position_value, kelly_size)
+        
+        # Применить лимиты
+        max_position = self.current_capital * Decimal(str(self.config.max_position_pct / 100))
+        position_value = min(position_value, max_position)
+        
+        # Конвертировать в количество
+        quantity = position_value / current_price
+        
+        return PositionSize(
+            value_usd=position_value,
+            quantity=quantity,
+            risk_amount=risk_amount,
+            risk_pct=self.config.risk_per_trade_pct,
+            leverage_used=1.0  # или рассчитать если используется плечо
+        )
+    
+    def _check_limits(self, signal: OptimizedSignal) -> bool:
+        """Проверить все лимиты."""
+        
+        # Daily loss limit
+        if self.daily_pnl <= -self.current_capital * Decimal(str(self.config.max_daily_loss_pct / 100)):
+            logger.warning("DAILY_LOSS_LIMIT_REACHED")
+            return False
+        
+        # Weekly loss limit
+        if self.weekly_pnl <= -self.current_capital * Decimal(str(self.config.max_weekly_loss_pct / 100)):
+            logger.warning("WEEKLY_LOSS_LIMIT_REACHED")
+            return False
+        
+        # Max open positions
+        if len(self.open_positions) >= self.config.max_open_positions:
+            logger.warning("MAX_POSITIONS_REACHED")
+            return False
+        
+        # Max exposure
+        current_exposure = sum(p.value for p in self.open_positions)
+        if current_exposure >= self.current_capital * Decimal(str(self.config.max_exposure_pct / 100)):
+            logger.warning("MAX_EXPOSURE_REACHED")
+            return False
+        
+        # Correlation check
+        correlated = self._count_correlated_positions(signal.symbol)
+        if correlated >= self.config.max_correlated_positions:
+            logger.warning("MAX_CORRELATED_POSITIONS", symbol=signal.symbol)
+            return False
+        
+        return True
+    
+    def _calculate_kelly(self, signal: OptimizedSignal) -> Decimal:
+        """
+        Kelly Criterion:
+        f* = (p * b - q) / b
+        
+        где:
+        p = вероятность выигрыша
+        q = вероятность проигрыша (1 - p)
+        b = отношение выигрыша к проигрышу (R:R)
+        """
+        p = Decimal(str(signal.ml_confidence))
+        q = 1 - p
+        
+        # R:R из сигнала
+        risk = abs(signal.entry_price - signal.stop_loss)
+        reward = abs(signal.take_profit_2 - signal.entry_price)  # Используем TP2
+        b = reward / risk if risk > 0 else Decimal("1")
+        
+        kelly = (p * b - q) / b
+        kelly = max(Decimal("0"), kelly)  # Не может быть отрицательным
+        
+        # Применить фракцию Kelly (консервативно)
+        kelly *= Decimal(str(self.config.kelly_fraction))
+        
+        return self.current_capital * kelly
+________________________________________
+5. PIPELINE ОБУЧЕНИЯ
+python
+# src/ml/training_pipeline.py
+
+class TrainingPipeline:
+    """Полный pipeline обучения ML моделей."""
+    
+    async def run(self):
+        """Запустить обучение."""
+        
+        # 1. Собрать данные
+        logger.info("Step 1: Collecting historical data...")
+        data = await self.data_collector.collect(
+            symbols=self.symbols,
+            start_date=self.start_date,
+            end_date=self.end_date
+        )
+        
+        # 2. Загрузить результаты бэктеста
+        logger.info("Step 2: Loading backtest results...")
+        backtest_results = self.load_backtest_results()
+        
+        # 3. Объединить данные
+        logger.info("Step 3: Merging data...")
+        training_data = self.merge_data(data, backtest_results)
+        
+        # 4. Feature engineering
+        logger.info("Step 4: Feature engineering...")
+        X, y = self.feature_engineer.prepare(training_data)
+        
+        # 5. Рассчитать оптимальные параметры для каждого сигнала
+        logger.info("Step 5: Calculating optimal parameters...")
+        y_optimal = self.calculate_optimal_params(training_data)
+        
+        # 6. Split данных
+        X_train, X_test, y_train, y_test = train_test_split(X, y_optimal, test_size=0.2)
+        
+        # 7. Обучить модели
+        logger.info("Step 6: Training models...")
+        self.model_suite.train(X_train, y_train)
+        
+        # 8. Evaluate
+        logger.info("Step 7: Evaluating...")
+        metrics = self.evaluate(X_test, y_test)
+        logger.info("Metrics", **metrics)
+        
+        # 9. Сохранить модели
+        logger.info("Step 8: Saving models...")
+        self.model_suite.save("models/")
+        
+        return metrics
+    
+    def calculate_optimal_params(self, data: pd.DataFrame) -> dict:
+        """
+        Рассчитать оптимальные параметры для каждого сигнала
+        на основе того что РЕАЛЬНО произошло.
+        """
+        optimal = {
+            'optimal_sl': [],
+            'optimal_tp1': [],
+            'optimal_tp2': [],
+            'optimal_tp3': [],
+            'optimal_lifetime': [],
+        }
+        
+        for _, row in data.iterrows():
+            # Оптимальный SL = максимальная просадка + буфер
+            max_dd = row['max_drawdown']
+            optimal['optimal_sl'].append(max_dd * 1.1)  # +10% буфер
+            
+            # Оптимальный TP = реальный максимум прибыли
+            max_profit = row['max_profit']
+            optimal['optimal_tp1'].append(max_profit * 0.3)
+            optimal['optimal_tp2'].append(max_profit * 0.6)
+            optimal['optimal_tp3'].append(max_profit * 0.9)
+            
+            # Оптимальный lifetime = время до макс прибыли
+            optimal['optimal_lifetime'].append(row['time_to_max_profit_hours'])
+        
+        return optimal
+________________________________________
+6. КОНФИГУРАЦИЯ
+yaml
+# config/ml_config.yaml
+
+ml:
+  enabled: true
+  
+  # Данные для обучения
+  training:
+    min_samples: 1000           # Минимум сэмплов для обучения
+    lookback_days: 90           # Период исторических данных
+    validation_split: 0.2       # Доля для валидации
+    
+  # Модели
+  models:
+    direction:
+      type: "xgboost"
+      n_estimators: 100
+      max_depth: 6
+      learning_rate: 0.1
+    
+    levels:
+      type: "xgboost"
+      n_estimators: 100
+      max_depth: 4
+      
+  # Feature engineering
+  features:
+    use_technical: true
+    use_orderbook: true
+    use_cross_exchange: true
+    use_time_features: true
+    
+  # Оптимизация сигналов
+  optimization:
+    min_confidence: 0.55        # Минимальная уверенность для сигнала
+    min_rr: 2.0                 # Минимальный R:R
+    sl_min_atr: 1.5             # Минимум ATR для SL
+    sl_max_pct: 10.0            # Максимум % для SL
+    lifetime_min_hours: 4
+    lifetime_max_hours: 48
+
+# Risk Management
+risk:
+  risk_per_trade_pct: 1.0
+  max_position_pct: 10.0
+  use_kelly: true
+  kelly_fraction: 0.25
+  max_daily_loss_pct: 3.0
+  max_weekly_loss_pct: 7.0
+  max_total_drawdown_pct: 15.0
+  max_open_positions: 5
+  max_correlated_positions: 2
+  max_exposure_pct: 30.0
+
+# Money Management  
+money:
+  initial_capital: 10000        # Начальный капитал в USDT
+  compound_profits: true        # Реинвестировать прибыль
+  withdraw_threshold_pct: 50    # Выводить при росте на X%
+```
+
+---
+
+## 7. СТРУКТУРА ФАЙЛОВ
+```
+src/ml/
+├── __init__.py
+├── config.py                    # ML конфигурация
+├── data_collector.py            # Сбор исторических данных
+├── feature_engineering.py       # Создание фичей
+├── model_trainer.py             # Обучение моделей
+├── models/
+│   ├── direction_classifier.py  # Классификатор направления
+│   ├── level_regressors.py      # Регрессоры SL/TP
+│   ├── lifetime_regressor.py    # Регрессор времени жизни
+│   └── confidence_calibrator.py # Калибратор вероятности
+├── signal_optimizer.py          # Оптимизатор сигналов
+├── risk_manager.py              # Risk Management
+├── money_manager.py             # Money Management
+├── training_pipeline.py         # Pipeline обучения
+├── backtester_integration.py    # Интеграция с бэктестером
+└── utils/
+    ├── metrics.py               # Метрики оценки
+    └── visualization.py         # Визуализация результатов
+________________________________________
+8. ИНТЕГРАЦИЯ С BINANCEFRIEND
+python
+# src/screener/screener.py
+
+class ManipulationScreener:
+    def __init__(self, ...):
+        # ... existing code ...
+        
+        # ML компоненты
+        if settings.ml.enabled:
+            self.ml_optimizer = SignalOptimizer.load("models/")
+            self.risk_manager = RiskManager(
+                config=settings.risk,
+                initial_capital=Decimal(str(settings.money.initial_capital))
+            )
+    
+    async def _handle_detection(self, detection: Detection):
+        # ... existing code to generate signal ...
+        
+        if signal:
+            # ML оптимизация
+            if self.ml_optimizer:
+                market_data = await self._get_market_snapshot(signal.symbol)
+                optimized = self.ml_optimizer.optimize_signal(signal, market_data)
+                
+                if optimized is None:
+                    logger.info("SIGNAL_REJECTED_BY_ML", symbol=signal.symbol)
+                    return
+                
+                signal = optimized
+            
+            # Risk Management
+            if self.risk_manager:
+                position_size = self.risk_manager.calculate_position_size(
+                    signal, 
+                    current_price=market_data.price
+                )
+                
+                if position_size is None:
+                    logger.info("SIGNAL_REJECTED_BY_RISK", symbol=signal.symbol)
+                    return
+                
+                signal.position_size = position_size
+            
+            # Log and send
+            await self.signal_logger.log_signal(signal)
+            await self.telegram_notifier.send_trade_signal(signal)
+```
+
+---
+
+## 9. МЕТРИКИ ОЦЕНКИ
+
+| Метрика | Описание | Целевое значение |
+|---------|----------|------------------|
+| Win Rate | % прибыльных сделок | > 55% |
+| Profit Factor | Gross Profit / Gross Loss | > 1.5 |
+| Sharpe Ratio | Risk-adjusted return | > 1.5 |
+| Max Drawdown | Максимальная просадка | < 15% |
+| Average R:R | Средний Risk/Reward | > 2.0 |
+| Kelly Optimal | Оптимальный размер по Kelly | Отслеживать |
+| Confidence Calibration | Точность вероятностей | Brier Score < 0.2 |
+
+---
+
+## 10. ПЛАН РЕАЛИЗАЦИИ
+
+| Этап | Задача | Время |
+|------|--------|-------|
+| 1 | Data Collector — сбор исторических данных | 2-3 дня |
+| 2 | Feature Engineering — создание фичей | 2-3 дня |
+| 3 | Model Training — базовые модели | 3-4 дня |
+| 4 | Signal Optimizer — оптимизация сигналов | 2-3 дня |
+| 5 | Risk Manager — управление рисками | 2 дня |
+| 6 | Money Manager — управление капиталом | 1 день |
+| 7 | Интеграция с BinanceFriend | 2 дня |
+| 8 | Тестирование и настройка | 3-4 дня |
+| **Итого** | | **~20 дней** |
+
+---
+
+## 11. ЗАВИСИМОСТИ
+```
+# requirements_ml.txt
+xgboost>=2.0.0
+lightgbm>=4.0.0
+scikit-learn>=1.3.0
+pandas>=2.0.0
+numpy>=1.24.0
+ta-lib>=0.4.28          # Технические индикаторы
+optuna>=3.4.0           # Hyperparameter optimization
+shap>=0.43.0            # Model explainability
+joblib>=1.3.0           # Model serialization
+
+
+
+

@@ -1,0 +1,1048 @@
+ГЕНЕРАЛЬНЫЙ ПРОМПТ: ML-СИСТЕМА ОПТИМИЗАЦИИ СИГНАЛОВ BINANCEFRIEND
+
+КРИТИЧЕСКИЕ ИНСТРУКЦИИ — ЧИТАТЬ ПЕРЕД КАЖДОЙ СЕССИЕЙ!
+Ты разрабатываешь ML-систему для проекта BinanceFriend.
+Расположение файлов:
+
+Проект: G:\BinanceFriend\
+ТЗ: G:\BinanceFriend\DOCSS\ТЕХНИЧЕСКОЕ ЗАДАНИЕ МЛ.docx
+Этот промпт: G:\BinanceFriend\DOCSS\ГЕНЕРАЛЬНЫЙПРОМПТМЛ.txt
+
+ПЕРВОЕ ДЕЙСТВИЕ КАЖДОЙ СЕССИИ:
+
+Прочитай этот файл ПОЛНОСТЬЮ
+Прочитай ТЗ из файла .docx
+Проверь что уже сделано: ls -la src/ml/
+Проверь статус в файле G:\BinanceFriend\DOCSS\ML_PROGRESS.md
+Продолжи с места остановки
+
+
+АБСОЛЮТНЫЕ ЗАПРЕТЫ — НАРУШЕНИЕ = ПРОВАЛ
+❌ ЗАПРЕЩЕНО КАТЕГОРИЧЕСКИ:
+1. ХАРДКОД
+   ❌ threshold = 65
+   ❌ url = "https://api.binance.com"
+   ❌ sleep(300)
+   ✅ threshold = config.ml.min_confidence
+   ✅ url = config.binance.futures_rest_url
+   ✅ sleep(config.scanning.interval_seconds)
+
+2. МОКИ И ЗАГЛУШКИ
+   ❌ return {"mock": "data"}
+   ❌ # TODO: implement later
+   ❌ pass
+   ✅ Реальная реализация или raise NotImplementedError("Описание что нужно")
+
+3. МОНОЛИТ
+   ❌ Один файл > 500 строк
+   ❌ Один метод > 50 строк
+   ❌ Один класс делает всё
+   ✅ Разбивать на модули по ответственности
+   ✅ Single Responsibility Principle
+
+4. ДУБЛИРОВАНИЕ КОДА
+   ❌ Копипаста логики в разные файлы
+   ❌ Похожие функции в разных местах
+   ✅ Выносить в общие утилиты
+   ✅ DRY (Don't Repeat Yourself)
+
+5. ГЛОТАНИЕ ОШИБОК
+   ❌ except: pass
+   ❌ except Exception: return None
+   ✅ except Exception as e: logger.error("context", error=str(e)); raise
+   ✅ Или возвращать Result/Either паттерн с явной ошибкой
+
+6. ИГНОРИРОВАНИЕ СУЩЕСТВУЮЩЕГО КОДА
+   ❌ Создавать новые компоненты когда есть существующие
+   ❌ Дублировать функционал который уже есть
+   ✅ СНАЧАЛА изучить что есть в проекте
+   ✅ Использовать существующие компоненты: FuturesMonitor, StateStore, DetectionEngine
+
+7. НЕПОДКЛЮЧЁННЫЙ КОД
+   ❌ Написать класс но не использовать
+   ❌ Написать конфиг но не читать его
+   ✅ Каждый написанный код должен быть интегрирован
+   ✅ Проверять что код реально вызывается
+
+8. ОТСУТСТВИЕ ТИПИЗАЦИИ
+   ❌ def process(data):
+   ❌ def calculate(x, y, z):
+   ✅ def process(data: pd.DataFrame) -> ProcessedData:
+   ✅ def calculate(x: Decimal, y: float, z: int) -> CalculationResult:
+
+9. МАГИЧЕСКИЕ СТРОКИ И ЧИСЛА
+   ❌ if status == "active":
+   ❌ if score > 65:
+   ✅ if status == Status.ACTIVE:
+   ✅ if score > config.ml.min_score:
+
+10. ASYNC/SYNC СМЕШИВАНИЕ
+    ❌ Вызывать sync функции в async контексте без executor
+    ❌ Блокирующие операции в async функциях
+    ✅ Использовать asyncio.to_thread() для блокирующих операций
+    ✅ Все IO операции должны быть async
+
+ОБЯЗАТЕЛЬНЫЕ ПРАКТИКИ
+✅ ДЕЛАТЬ ВСЕГДА:
+1. КОНФИГУРАЦИЯ
+   - ВСЕ параметры в config/ml_config.yaml
+   - ВСЕ URL в конфиге
+   - ВСЕ пороги в конфиге
+   - Читать через settings.ml.xxx
+
+2. ЛОГИРОВАНИЕ
+   - Каждая публичная функция логирует вход и выход
+   - Все ошибки логируются с контекстом
+   - Использовать structlog как в остальном проекте
+   - logger = structlog.get_logger(__name__)
+
+3. ТИПИЗАЦИЯ
+   - Все функции с type hints
+   - Все dataclass с типами
+   - Использовать Optional, Union, Literal где нужно
+   - Проверять: mypy src/ml/ --strict
+
+4. ТЕСТИРУЕМОСТЬ
+   - Dependency Injection для внешних зависимостей
+   - Чистые функции где возможно
+   - Интерфейсы/протоколы для абстракций
+
+5. ДОКУМЕНТАЦИЯ
+   - Docstring для каждого класса и публичного метода
+   - Описание что делает, параметры, возвращаемое значение
+   - Примеры использования для сложных функций
+
+6. ВАЛИДАЦИЯ
+   - Проверять входные данные
+   - Проверять что данные не None/пустые
+   - Явные ошибки при невалидных данных
+
+7. ИСПОЛЬЗОВАНИЕ СУЩЕСТВУЮЩЕГО
+   - FuturesMonitor — для OI, Funding, L/S данных
+   - StateStore — для cross-exchange данных
+   - DetectionEngine — для детекций
+   - RealTimeMonitor — для market data
+   - НЕ создавать дубли этих компонентов!
+
+СТРУКТУРА ML МОДУЛЯ
+src/ml/
+├── __init__.py                    # Экспорты модуля
+├── config.py                      # MLConfig dataclass
+│
+├── data/
+│   ├── __init__.py
+│   ├── collector.py               # HistoricalDataCollector
+│   ├── preprocessor.py            # DataPreprocessor
+│   └── schemas.py                 # TrainingDataPoint, MarketSnapshot
+│
+├── features/
+│   ├── __init__.py
+│   ├── engineer.py                # FeatureEngineer
+│   ├── technical.py               # Технические индикаторы
+│   ├── market.py                  # Рыночные фичи
+│   └── cross_exchange.py          # Cross-exchange фичи
+│
+├── models/
+│   ├── __init__.py
+│   ├── base.py                    # BaseModel protocol
+│   ├── direction.py               # DirectionClassifier
+│   ├── levels.py                  # SL/TP Regressors
+│   ├── lifetime.py                # LifetimeRegressor
+│   ├── confidence.py              # ConfidenceCalibrator
+│   └── ensemble.py                # ModelEnsemble
+│
+├── optimization/
+│   ├── __init__.py
+│   ├── signal_optimizer.py        # SignalOptimizer
+│   └── param_calculator.py        # OptimalParamCalculator
+│
+├── risk/
+│   ├── __init__.py
+│   ├── risk_manager.py            # RiskManager
+│   ├── position_sizer.py          # PositionSizer (Kelly, Fixed%)
+│   └── limits.py                  # LimitChecker
+│
+├── training/
+│   ├── __init__.py
+│   ├── pipeline.py                # TrainingPipeline
+│   ├── validator.py               # ModelValidator
+│   └── metrics.py                 # EvaluationMetrics
+│
+├── integration/
+│   ├── __init__.py
+│   ├── binancefriend.py           # Интеграция с основной системой
+│   └── backtester.py              # Интеграция с бэктестером
+│
+└── utils/
+    ├── __init__.py
+    ├── serialization.py           # Сохранение/загрузка моделей
+    └── validation.py              # Валидаторы данных
+
+ПОРЯДОК РАЗРАБОТКИ
+ЭТАП 1: Инфраструктура (сначала!)
+1.1 Создать config/ml_config.yaml с ВСЕМИ параметрами
+1.2 Создать src/ml/config.py с MLConfig dataclass
+1.3 Добавить загрузку ML конфига в settings.py
+1.4 Создать базовые схемы данных в schemas.py
+1.5 Проверить что конфиг читается: python -c "from config.settings import settings; print(settings.ml)"
+ЭТАП 2: Сбор данных
+2.1 Реализовать HistoricalDataCollector
+    - Использовать СУЩЕСТВУЮЩИЙ FuturesMonitor для OI/Funding
+    - Использовать СУЩЕСТВУЮЩИЙ StateStore для cross-exchange
+    - Добавить методы для исторических klines
+2.2 Реализовать DataPreprocessor
+2.3 Протестировать сбор данных для одного символа
+2.4 Протестировать сбор данных для 10 символов
+ЭТАП 3: Feature Engineering
+3.1 Реализовать FeatureEngineer
+3.2 Реализовать технические индикаторы (RSI, MACD, BB, ATR)
+3.3 Реализовать рыночные фичи
+3.4 Реализовать cross-exchange фичи
+3.5 Проверить что все фичи генерируются без NaN
+ЭТАП 4: Модели
+4.1 Реализовать DirectionClassifier
+4.2 Реализовать LevelRegressors (SL, TP1, TP2, TP3)
+4.3 Реализовать LifetimeRegressor
+4.4 Реализовать ConfidenceCalibrator
+4.5 Реализовать ModelEnsemble
+4.6 Протестировать каждую модель отдельно
+ЭТАП 5: Training Pipeline
+5.1 Реализовать TrainingPipeline
+5.2 Реализовать ModelValidator
+5.3 Реализовать метрики оценки
+5.4 Запустить обучение на тестовых данных
+5.5 Проверить метрики
+ЭТАП 6: Signal Optimizer
+6.1 Реализовать SignalOptimizer
+6.2 Реализовать OptimalParamCalculator
+6.3 Протестировать оптимизацию одного сигнала
+ЭТАП 7: Risk Management
+7.1 Реализовать RiskManager
+7.2 Реализовать PositionSizer
+7.3 Реализовать LimitChecker
+7.4 Протестировать расчёт размера позиции
+ЭТАП 8: Интеграция
+8.1 Интегрировать в screener.py
+8.2 Добавить ML оптимизацию в _handle_detection()
+8.3 Добавить Risk Management
+8.4 Протестировать полный flow
+
+ЧЕКЛИСТ ПОСЛЕ КАЖДОЙ СЕССИИ
+markdown## ML_PROGRESS.md — обновлять после каждой сессии!
+
+### Статус: [В процессе / Завершён]
+### Последнее обновление: [дата время]
+### Текущий этап: [номер и название]
+
+### Выполнено:
+- [x] Этап 1.1: ml_config.yaml создан
+- [x] Этап 1.2: MLConfig dataclass создан
+- [ ] Этап 1.3: ...
+
+### В процессе:
+- Этап X.X: описание, что осталось
+
+### Следующие шаги:
+1. ...
+2. ...
+
+### Известные проблемы:
+- ...
+
+### Файлы изменённые в этой сессии:
+- src/ml/config.py (создан)
+- config/ml_config.yaml (создан)
+- ...
+
+ПРОВЕРКИ ПЕРЕД КОММИТОМ
+bash# 1. Синтаксис
+python -m py_compile src/ml/*.py
+python -m py_compile src/ml/**/*.py
+
+# 2. Импорты работают
+python -c "from src.ml import *"
+
+# 3. Конфиг читается
+python -c "from config.settings import settings; print(settings.ml.enabled)"
+
+# 4. Нет хардкода
+grep -rn "= 65\|= 0.02\|api.binance.com" src/ml/ && echo "НАЙДЕН ХАРДКОД!" || echo "OK"
+
+# 5. Нет TODO/FIXME без issue
+grep -rn "TODO\|FIXME\|HACK" src/ml/ 
+
+# 6. Типизация
+mypy src/ml/ --ignore-missing-imports
+
+# 7. Тесты (когда будут)
+pytest tests/ml/ -v
+
+ШАБЛОНЫ КОДА
+Dataclass с валидацией:
+pythonfrom dataclasses import dataclass, field
+from decimal import Decimal
+from typing import Optional
+import structlog
+
+logger = structlog.get_logger(__name__)
+
+@dataclass
+class TrainingDataPoint:
+    """Точка данных для обучения ML модели."""
+    
+    symbol: str
+    timestamp: datetime
+    
+    # Ценовые данные
+    price: Decimal
+    price_change_1h: float
+    
+    # Валидация
+    def __post_init__(self):
+        if not self.symbol:
+            raise ValueError("symbol cannot be empty")
+        if self.price <= 0:
+            raise ValueError(f"price must be positive, got {self.price}")
+Класс с dependency injection:
+pythonclass FeatureEngineer:
+    """Генератор фичей для ML модели."""
+    
+    def __init__(
+        self,
+        config: MLConfig,
+        futures_monitor: FuturesMonitor,  # Существующий компонент!
+        state_store: StateStore,           # Существующий компонент!
+    ):
+        self.config = config
+        self.futures = futures_monitor
+        self.state = state_store
+        self.logger = structlog.get_logger(__name__)
+    
+    def extract_features(self, symbol: str, timestamp: datetime) -> FeatureVector:
+        """
+        Извлечь фичи для символа.
+        
+        Args:
+            symbol: Торговый символ (например, "BTCUSDT")
+            timestamp: Время для которого извлекаем фичи
+            
+        Returns:
+            FeatureVector с всеми фичами
+            
+        Raises:
+            DataNotFoundError: Если данные недоступны
+        """
+        self.logger.debug("extracting_features", symbol=symbol, timestamp=timestamp)
+        
+        # Получить данные из СУЩЕСТВУЮЩИХ компонентов
+        futures_state = self.futures.get_state(symbol)
+        if not futures_state:
+            raise DataNotFoundError(f"No futures data for {symbol}")
+        
+        cross_data = self.state.get_symbol_snapshot(symbol)
+        
+        # ... extract features ...
+        
+        self.logger.debug("features_extracted", symbol=symbol, feature_count=len(features))
+        return features
+Обработка ошибок:
+pythonclass SignalOptimizer:
+    async def optimize(self, signal: TradeSignal) -> OptimizedSignal | None:
+        """
+        Оптимизировать сигнал.
+        
+        Returns:
+            OptimizedSignal если оптимизация успешна, None если сигнал отклонён
+        """
+        try:
+            # Получить рыночные данные
+            market_data = await self._get_market_data(signal.symbol)
+            if market_data is None:
+                self.logger.warning("no_market_data", symbol=signal.symbol)
+                return None
+            
+            # Извлечь фичи
+            features = self.feature_engineer.extract_features(
+                signal.symbol, 
+                signal.timestamp
+            )
+            
+            # Получить предсказания
+            predictions = self.model.predict(features)
+            
+            # Проверить уверенность
+            if predictions.confidence < self.config.min_confidence:
+                self.logger.info(
+                    "signal_rejected_low_confidence",
+                    symbol=signal.symbol,
+                    confidence=predictions.confidence,
+                    threshold=self.config.min_confidence
+                )
+                return None
+            
+            # Создать оптимизированный сигнал
+            optimized = self._build_optimized_signal(signal, predictions, market_data)
+            
+            self.logger.info(
+                "signal_optimized",
+                symbol=signal.symbol,
+                original_sl=signal.stop_loss,
+                optimized_sl=optimized.stop_loss,
+                confidence=predictions.confidence
+            )
+            
+            return optimized
+            
+        except DataNotFoundError as e:
+            self.logger.warning("optimization_failed_no_data", error=str(e))
+            return None
+        except Exception as e:
+            self.logger.error("optimization_failed", error=str(e), exc_info=True)
+            raise  # Пробрасываем неожиданные ошибки!
+```
+
+---
+
+## КРИТИЧЕСКИЕ НАПОМИНАНИЯ
+```
+⚠️ ПЕРЕД НАПИСАНИЕМ ЛЮБОГО КОДА:
+1. Проверь — есть ли уже такой функционал в проекте?
+2. Проверь — все ли параметры в конфиге?
+3. Проверь — используешь ли существующие компоненты?
+
+⚠️ ПОСЛЕ НАПИСАНИЯ КОДА:
+1. Код компилируется без ошибок?
+2. Код интегрирован (вызывается откуда-то)?
+3. Нет хардкода?
+4. Есть логирование?
+5. Есть обработка ошибок?
+6. Обновлён ML_PROGRESS.md?
+
+⚠️ ЕСЛИ ЧТО-ТО НЕ ПОНЯТНО:
+1. НЕ угадывай — спроси
+2. НЕ делай "примерно" — сделай точно по ТЗ
+3. НЕ пропускай шаги — делай по порядку
+```
+
+---
+
+## НАЧАЛО РАБОТЫ
+```
+1. Прочитай ТЗ: G:\BinanceFriend\DOCSS\ТЕХНИЧЕСКОЕ ЗАДАНИЕ МЛ.docx
+2. Изучи существующий код: src/screener/, src/signals/, src/cross_exchange/
+3. Создай ML_PROGRESS.md в G:\BinanceFriend\DOCSS\
+4. Начни с Этапа 1: Инфраструктура
+5. После каждого подэтапа — проверка и обновление прогресса
+ПОМНИ: Лучше медленно и правильно, чем быстро и с багами!
+═══════════════════════════════════════════════════════════════
+ЗАЩИТА ОТ OVERFITTING И ЛОЖНОГО ОПТИМИЗМА
+═══════════════════════════════════════════════════════════════
+
+### ОБЯЗАТЕЛЬНЫЕ ПРОВЕРКИ ML:
+
+1. РАЗДЕЛЕНИЕ ДАННЫХ СТРОГО ПО ВРЕМЕНИ:
+   ❌ random split (train_test_split с shuffle=True)
+   ✅ temporal split (первые 80% по времени = train, последние 20% = test)
+```python
+# ПРАВИЛЬНО:
+data = data.sort_values('timestamp')
+split_idx = int(len(data) * 0.8)
+train = data.iloc[:split_idx]
+test = data.iloc[split_idx:]  # Только БУДУЩИЕ данные!
+
+# НЕПРАВИЛЬНО:
+train, test = train_test_split(data, test_size=0.2, shuffle=True)  # ❌ ЗАПРЕЩЕНО!
+```
+
+2. WALK-FORWARD VALIDATION:
+   - Обучить на месяц 1-3
+   - Тестировать на месяц 4
+   - Обучить на месяц 1-4
+   - Тестировать на месяц 5
+   - И так далее
+
+3. МЕТРИКИ НА OUT-OF-SAMPLE:
+   - Все метрики считать ТОЛЬКО на test данных
+   - Train метрики НЕ показывать пользователю
+   - Если test metrics сильно хуже train — OVERFITTING!
+
+4. МИНИМАЛЬНЫЕ ТРЕБОВАНИЯ:
+   - Минимум 500 сигналов для обучения
+   - Минимум 100 сигналов для теста
+   - Минимум 3 месяца исторических данных
+   - Если меньше — НЕ обучать, вернуть ошибку!
+```python
+def validate_data_sufficiency(train_data: pd.DataFrame, test_data: pd.DataFrame) -> None:
+    """Проверить достаточность данных."""
+    if len(train_data) < 500:
+        raise InsufficientDataError(f"Need 500+ train samples, got {len(train_data)}")
+    if len(test_data) < 100:
+        raise InsufficientDataError(f"Need 100+ test samples, got {len(test_data)}")
+    
+    train_period = (train_data['timestamp'].max() - train_data['timestamp'].min()).days
+    if train_period < 90:
+        raise InsufficientDataError(f"Need 90+ days of data, got {train_period}")
+```
+
+5. BASELINE СРАВНЕНИЕ:
+   - Всегда сравнивать с простым baseline
+   - Baseline: случайный выбор или всегда LONG
+   - Если ML не лучше baseline на 10%+ — модель бесполезна!
+```python
+def calculate_baseline(test_data: pd.DataFrame) -> float:
+    """Baseline: просто держать все сигналы без оптимизации."""
+    return test_data['pnl_percent'].mean()
+
+def validate_model_vs_baseline(model_pnl: float, baseline_pnl: float) -> bool:
+    """Модель должна быть лучше baseline минимум на 10%."""
+    improvement = (model_pnl - baseline_pnl) / abs(baseline_pnl) * 100
+    if improvement < 10:
+        logger.warning("MODEL_NOT_BETTER_THAN_BASELINE", 
+                      model=model_pnl, baseline=baseline_pnl, improvement=improvement)
+        return False
+    return True
+```
+
+6. РЕГУЛЯРИЗАЦИЯ:
+   - Использовать L1/L2 регуляризацию
+   - Ограничивать глубину деревьев
+   - Early stopping
+```python
+model = XGBClassifier(
+    max_depth=4,           # НЕ глубже 4-6
+    min_child_weight=10,   # Минимум сэмплов в листе
+    reg_alpha=0.1,         # L1 регуляризация
+    reg_lambda=1.0,        # L2 регуляризация
+    early_stopping_rounds=10,
+)
+```
+
+7. ЧЕСТНАЯ ОТЧЁТНОСТЬ:
+   - Показывать ОБЯЗАТЕЛЬНО: train vs test метрики
+   - Показывать ОБЯЗАТЕЛЬНО: baseline сравнение
+   - Показывать ОБЯЗАТЕЛЬНО: доверительные интервалы
+   - НЕ показывать только лучшие результаты!
+```python
+@dataclass
+class ModelReport:
+    """Честный отчёт о модели."""
+    
+    # Train метрики (для диагностики overfitting)
+    train_accuracy: float
+    train_profit_factor: float
+    
+    # Test метрики (ГЛАВНЫЕ!)
+    test_accuracy: float
+    test_profit_factor: float
+    test_sharpe: float
+    test_max_drawdown: float
+    
+    # Baseline сравнение
+    baseline_pnl: float
+    model_pnl: float
+    improvement_vs_baseline_pct: float
+    
+    # Доверительные интервалы
+    confidence_interval_95: tuple[float, float]
+    
+    # Диагностика
+    is_overfitting: bool  # train >> test
+    is_better_than_baseline: bool
+    is_production_ready: bool  # Все проверки пройдены
+```
+
+═══════════════════════════════════════════════════════════════
+КОГДА НЕ ИСПОЛЬЗОВАТЬ ML:
+═══════════════════════════════════════════════════════════════
+
+ML модель НЕ ДОЛЖНА использоваться если:
+1. Меньше 500 сигналов в train
+2. Test accuracy < 55%
+3. Model PnL < Baseline PnL
+4. Train accuracy > Test accuracy + 15% (overfitting)
+5. Sharpe Ratio < 1.0
+
+В этих случаях — использовать ОРИГИНАЛЬНЫЕ сигналы без ML оптимизации!
+```python
+class SignalOptimizer:
+    def optimize(self, signal: TradeSignal) -> OptimizedSignal:
+        if not self.model_report.is_production_ready:
+            logger.warning("ML_MODEL_NOT_READY_USING_ORIGINAL")
+            return signal  # Вернуть без изменений!
+        
+        # ... ML оптимизация ...
+1. SURVIVORSHIP BIAS — САМАЯ ОПАСНАЯ ОШИБКА
+ПРОБЛЕМА: Мы обучаемся на сигналах которые УЖЕ сгенерировались.
+Но не видим сигналы которые МОГЛИ БЫ сгенерироваться но не прошли фильтры.
+
+ПРИМЕР:
+- Было 1000 ситуаций похожих на памп
+- Наша система сгенерировала 200 сигналов
+- 800 ситуаций отфильтровались
+- Мы обучаем ML только на 200
+- ML не знает про 800 "почти сигналов"
+
+РЕШЕНИЕ:
+Собирать ВСЕ потенциальные ситуации, не только сгенерированные сигналы.
+Добавить колонку: signal_generated = True/False
+ML должен учиться и на отклонённых ситуациях!
+
+2. SLIPPAGE И РЕАЛЬНОЕ ИСПОЛНЕНИЕ
+ПРОБЛЕМА: Бэктест предполагает идеальное исполнение.
+В реальности:
+- Entry по лимиту может НЕ исполниться
+- SL может проскользить на 0.5-2% на волатильности
+- TP может проскользить
+- На низколиквидных монетах slippage 1-5%
+
+ДОБАВИТЬ В ТЗ:
+
+@dataclass
+class SlippageModel:
+    """Модель проскальзывания."""
+    
+    # Средний slippage по ликвидности
+    high_liquidity_slippage: float = 0.0005    # 0.05%
+    medium_liquidity_slippage: float = 0.002   # 0.2%
+    low_liquidity_slippage: float = 0.01       # 1%
+    
+    # Slippage на SL (всегда хуже)
+    sl_slippage_multiplier: float = 2.0        # SL slippage в 2 раза больше
+    
+    # Вероятность неисполнения лимитного ордера
+    limit_order_fill_rate: float = 0.7         # 70% исполняются
+
+def apply_realistic_slippage(
+    backtest_result: BacktestResult,
+    liquidity: str  # HIGH/MEDIUM/LOW
+) -> BacktestResult:
+    """Применить реалистичный slippage к результатам."""
+    ...
+
+3. MARKET IMPACT — МЫ ДВИГАЕМ ЦЕНУ
+ПРОБЛЕМА: Если много людей используют одинаковые сигналы:
+- Вход по сигналу двигает цену вверх
+- Выход двигает цену вниз
+- Сигнал становится самоисполняющимся пророчеством
+- Или наоборот — перестаёт работать
+
+ТАКЖЕ: Наш собственный ордер влияет на цену если позиция большая.
+
+ДОБАВИТЬ:
+
+@dataclass  
+class MarketImpactModel:
+    """Модель влияния на рынок."""
+    
+    # Процент от ADV (Average Daily Volume) который мы можем торговать
+    max_position_pct_of_adv: float = 0.01  # 1% от дневного объёма
+    
+    # Impact на цену при входе
+    def calculate_impact(self, position_size: Decimal, adv: Decimal) -> float:
+        """Чем больше позиция относительно объёма — тем больше impact."""
+        pct_of_adv = float(position_size / adv)
+        # Квадратичная зависимость (эмпирически доказано)
+        impact = pct_of_adv ** 2 * 100
+        return impact
+
+4. КОРРЕЛЯЦИЯ СИГНАЛОВ
+ПРОБЛЕМА: Если одновременно 5 сигналов на коррелированных монетах:
+- BTC падает → все альты падают
+- 5 лонгов = 1 большой лонг на BTC
+- Диверсификации НЕТ
+- Риск умножается
+
+ДОБАВИТЬ:
+
+class CorrelationFilter:
+    """Фильтр коррелированных позиций."""
+    
+    # Корреляционная матрица (обновлять еженедельно)
+    correlation_matrix: pd.DataFrame
+    
+    # Порог корреляции
+    max_correlation: float = 0.7
+    
+    def filter_correlated_signals(
+        self, 
+        new_signal: TradeSignal,
+        open_positions: list[Position]
+    ) -> bool:
+        """
+        Отклонить сигнал если коррелирует с открытыми позициями.
+        """
+        for pos in open_positions:
+            corr = self.get_correlation(new_signal.symbol, pos.symbol)
+            if corr > self.max_correlation:
+                return False  # Отклонить!
+        return True
+
+5. РЕЖИМЫ РЫНКА — ML МОДЕЛЬ ДОЛЖНА ЗНАТЬ КОНТЕКСТ
+ПРОБЛЕМА: Модель обученная на бычьем рынке не работает на медвежьем.
+
+ДОБАВИТЬ:
+
+class MarketRegimeDetector:
+    """Определение режима рынка."""
+    
+    def detect_regime(self, btc_data: pd.DataFrame) -> MarketRegime:
+        """
+        Режимы:
+        - BULL_TREND: BTC > MA200, MA50 > MA200
+        - BEAR_TREND: BTC < MA200, MA50 < MA200
+        - SIDEWAYS: Волатильность низкая, нет тренда
+        - HIGH_VOLATILITY: ATR > 2x среднего
+        - CAPITULATION: Резкое падение > 20% за неделю
+        """
+        ...
+
+# ML должен обучаться ОТДЕЛЬНО для каждого режима
+# Или режим должен быть фичей
+
+6. ВРЕМЯ УДЕРЖАНИЯ И OPPORTUNITY COST
+ПРОБЛЕМА: Сигнал может быть прибыльным, но держать 48 часов ради 2%?
+За это время могли быть лучшие возможности.
+
+ДОБАВИТЬ:
+
+@dataclass
+class OpportunityCostMetrics:
+    """Метрики альтернативных возможностей."""
+    
+    # Сколько других сигналов пропустили пока держали позицию
+    missed_signals_count: int
+    
+    # Средняя доходность пропущенных сигналов
+    missed_signals_avg_pnl: float
+    
+    # Скорректированный PnL
+    @property
+    def adjusted_pnl(self) -> float:
+        """PnL минус opportunity cost."""
+        return self.actual_pnl - self.missed_signals_avg_pnl
+
+7. ЧЕРНЫЕ ЛЕБЕДИ И ХВОСТОВЫЕ РИСКИ
+ПРОБЛЕМА: ML оптимизирует средний случай.
+Но один чёрный лебедь может убить счёт.
+
+ПРИМЕРЫ:
+- LUNA: -99% за день
+- FTX коллапс: ликвидность исчезла
+- Flash crash: SL проскочил на 30%
+
+ДОБАВИТЬ:
+
+class TailRiskManager:
+    """Управление хвостовыми рисками."""
+    
+    # Максимальный убыток на ЛЮБОЙ позиции (hard stop)
+    max_loss_per_position_pct: float = 10.0  # Даже если SL дальше!
+    
+    # Список токсичных монет (не торговать)
+    toxic_symbols: set[str] = {"LUNAUSDT", "USTUSDT", ...}
+    
+    # Проверка на аномалии перед входом
+    def check_anomalies(self, symbol: str) -> bool:
+        """
+        НЕ входить если:
+        - Цена упала > 50% за 24ч
+        - Объём упал > 80% 
+        - Биржа объявила делистинг
+        - Funding > 1% (экстремум)
+        """
+        ...
+
+8. TRANSACTION COSTS ПОЛНОСТЬЮ
+ПРОБЛЕМА: Учли только комиссии. Не учли:
+- Funding payments (каждые 8ч)
+- Spread (bid-ask)
+- Borrowing cost (для шортов на споте)
+
+ДОБАВИТЬ В BACKTEST:
+
+@dataclass
+class FullTransactionCosts:
+    """Полные транзакционные издержки."""
+    
+    # Комиссии
+    maker_fee: Decimal = Decimal("0.0002")
+    taker_fee: Decimal = Decimal("0.0005")
+    
+    # Funding (средний за период)
+    avg_funding_rate: Decimal = Decimal("0.0001")  # 0.01% каждые 8ч
+    
+    # Spread
+    avg_spread_pct: float = 0.0005  # 0.05%
+    
+    def calculate_total_cost(
+        self,
+        entry_price: Decimal,
+        exit_price: Decimal,
+        hold_time_hours: float,
+        is_maker_entry: bool,
+        is_maker_exit: bool
+    ) -> Decimal:
+        """Рассчитать ВСЕ издержки."""
+        
+        # Entry cost
+        entry_fee = self.maker_fee if is_maker_entry else self.taker_fee
+        entry_spread = Decimal(str(self.avg_spread_pct / 2))
+        
+        # Exit cost  
+        exit_fee = self.maker_fee if is_maker_exit else self.taker_fee
+        exit_spread = Decimal(str(self.avg_spread_pct / 2))
+        
+        # Funding (сколько 8-часовых периодов)
+        funding_periods = int(hold_time_hours / 8)
+        funding_cost = self.avg_funding_rate * funding_periods
+        
+        total = entry_fee + exit_fee + entry_spread + exit_spread + funding_cost
+        return total
+
+9. DRAWDOWN RECOVERY TIME
+ПРОБЛЕМА: Максимальная просадка 15% это одно.
+Но сколько ВРЕМЕНИ нужно чтобы восстановиться?
+
+ДОБАВИТЬ:
+
+@dataclass
+class DrawdownMetrics:
+    """Полные метрики просадки."""
+    
+    max_drawdown_pct: float
+    max_drawdown_duration_days: int      # Сколько дней в просадке
+    avg_recovery_time_days: float        # Среднее время восстановления
+    longest_drawdown_days: int           # Самая долгая просадка
+    
+    # Underwater curve
+    underwater_pct_time: float  # % времени в просадке
+
+10. POSITION SIZING — КРИТИЧЕСКИ ВАЖНО
+ПРОБЛЕМА: Kelly Criterion даёт ОПТИМАЛЬНЫЙ размер, но:
+- При ошибке в оценке вероятности — катастрофа
+- Kelly очень агрессивный
+- Drawdown при full Kelly может быть 50%+
+
+ДОБАВИТЬ:
+
+class ConservativePositionSizer:
+    """Консервативный расчёт размера позиции."""
+    
+    # Фракция Kelly (НИКОГДА full Kelly!)
+    kelly_fraction: float = 0.25  # Четверть Kelly
+    
+    # Абсолютные лимиты
+    max_position_pct: float = 5.0      # Макс 5% на позицию
+    max_risk_pct: float = 1.0          # Макс 1% риска на сделку
+    
+    # При серии убытков — уменьшать размер
+    def adjust_for_losing_streak(
+        self, 
+        base_size: Decimal,
+        consecutive_losses: int
+    ) -> Decimal:
+        """Уменьшать размер после убытков."""
+        if consecutive_losses >= 3:
+            reduction = 0.5 ** (consecutive_losses - 2)  # 50%, 25%, 12.5%...
+            return base_size * Decimal(str(reduction))
+        return base_size
+
+11. DATA QUALITY — МУСОР НА ВХОДЕ = МУСОР НА ВЫХОДЕ
+ПРОБЛЕМА: Данные с бирж могут быть:
+- С пропусками
+- С выбросами (ошибки API)
+- С дубликатами
+- С неправильными timestamp
+
+ДОБАВИТЬ:
+
+class DataQualityChecker:
+    """Проверка качества данных."""
+    
+    def validate(self, data: pd.DataFrame) -> DataQualityReport:
+        """
+        Проверки:
+        1. Нет пропущенных значений в критичных колонках
+        2. Нет дубликатов по timestamp
+        3. Timestamp монотонно растёт
+        4. Цены в разумном диапазоне (не 0, не inf)
+        5. Объёмы положительные
+        6. OI положительный
+        7. Funding в диапазоне [-3%, +3%]
+        """
+        ...
+    
+    def clean(self, data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Очистка:
+        1. Удалить дубликаты
+        2. Интерполировать пропуски (или удалить)
+        3. Заменить выбросы на медиану
+        4. Сортировать по времени
+        """
+        ...
+
+12. FEATURE IMPORTANCE И EXPLAINABILITY
+ПРОБЛЕМА: Если не понимаем ПОЧЕМУ модель приняла решение:
+- Не можем отлаживать
+- Не можем доверять
+- Не знаем когда модель сломается
+
+ДОБАВИТЬ:
+
+class ModelExplainer:
+    """Объяснение решений модели."""
+    
+    def explain_prediction(
+        self, 
+        features: FeatureVector,
+        prediction: Prediction
+    ) -> Explanation:
+        """
+        Вернуть:
+        1. Top-5 фичей повлиявших на решение
+        2. SHAP values для каждой фичи
+        3. Человекочитаемое объяснение
+        """
+        
+        # SHAP для объяснения
+        import shap
+        explainer = shap.TreeExplainer(self.model)
+        shap_values = explainer.shap_values(features)
+        
+        # Top features
+        top_features = sorted(
+            zip(self.feature_names, shap_values),
+            key=lambda x: abs(x[1]),
+            reverse=True
+        )[:5]
+        
+        # Человекочитаемое объяснение
+        explanation = self._generate_explanation(top_features)
+        
+        return Explanation(
+            top_features=top_features,
+            shap_values=shap_values,
+            human_readable=explanation
+        )
+
+13. MODEL MONITORING В PRODUCTION
+ПРОБЛЕМА: Модель деградирует со временем. Нужно отслеживать.
+
+ДОБАВИТЬ:
+
+class ModelMonitor:
+    """Мониторинг модели в production."""
+    
+    def __init__(self):
+        self.predictions: list = []
+        self.actuals: list = []
+        
+    def log_prediction(self, prediction: Prediction, actual_outcome: float):
+        """Логировать каждое предсказание и реальный результат."""
+        self.predictions.append(prediction)
+        self.actuals.append(actual_outcome)
+        
+        # Проверить drift каждые 100 предсказаний
+        if len(self.predictions) % 100 == 0:
+            self._check_drift()
+    
+    def _check_drift(self):
+        """Проверить деградацию модели."""
+        recent_accuracy = self._calculate_recent_accuracy(last_n=100)
+        baseline_accuracy = self.baseline_accuracy
+        
+        if recent_accuracy < baseline_accuracy - 0.05:  # 5% деградация
+            logger.error("MODEL_DRIFT_DETECTED",
+                        recent=recent_accuracy,
+                        baseline=baseline_accuracy)
+            # Отправить алерт!
+            # Возможно отключить ML и использовать оригинальные сигналы
+
+14. SURVIVORSHIP BIAS В СИМВОЛАХ
+ПРОБЛЕМА: Binance делистит монеты. 
+Мы обучаемся только на тех что ВЫЖИЛИ.
+Делистнутые монеты обычно падали на 90%+ перед делистингом.
+
+ДОБАВИТЬ:
+
+class DelistedSymbolsData:
+    """Данные по делистнутым символам."""
+    
+    # Список делистнутых с датами
+    delisted_symbols: dict[str, datetime]
+    
+    # Исторические данные делистнутых (скачать заранее!)
+    delisted_data: dict[str, pd.DataFrame]
+    
+    def include_delisted_in_training(
+        self,
+        training_data: pd.DataFrame
+    ) -> pd.DataFrame:
+        """Добавить делистнутые монеты в обучение."""
+        # Это покажет модели как выглядят монеты перед смертью
+        ...
+
+15. EXECUTION СИСТЕМА
+ПРОБЛЕМА: ML оптимизирует сигналы, но КТО их исполняет?
+
+Нужно добавить в ТЗ:
+- Как сигнал попадает на биржу?
+- Автоматически или вручную?
+- Если автоматически — нужна execution система
+
+ДОБАВИТЬ В SCOPE:
+
+class ExecutionEngine:
+    """Система исполнения сигналов (БУДУЩЕЕ)."""
+    
+    # Paper trading mode (обязательно сначала!)
+    paper_trading: bool = True
+    
+    # Execution modes
+    # 1. MANUAL — только алерты, человек исполняет
+    # 2. SEMI_AUTO — бот предлагает, человек подтверждает
+    # 3. FULL_AUTO — бот исполняет сам (ОПАСНО!)
+    
+    execution_mode: str = "MANUAL"  # Начинать ТОЛЬКО с MANUAL!
+
+ФИНАЛЬНЫЙ ЧЕКЛИСТ — ДОБАВИТЬ В ПРОМПТ
+═══════════════════════════════════════════════════════════════
+ЧЕКЛИСТ РЕАЛИСТИЧНОСТИ ML СИСТЕМЫ
+═══════════════════════════════════════════════════════════════
+
+ДАННЫЕ:
+[ ] Survivorship bias учтён (включены отклонённые ситуации)
+[ ] Делистнутые монеты включены в обучение
+[ ] Data quality проверки реализованы
+[ ] Temporal split (НЕ random!)
+
+ТРАНЗАКЦИОННЫЕ ИЗДЕРЖКИ:
+[ ] Комиссии maker/taker
+[ ] Slippage модель
+[ ] Funding payments
+[ ] Spread (bid-ask)
+[ ] Market impact
+
+РИСКИ:
+[ ] Корреляция позиций проверяется
+[ ] Tail risk management
+[ ] Режим рынка определяется
+[ ] Max drawdown лимиты
+[ ] Losing streak position reduction
+
+МОДЕЛЬ:
+[ ] Walk-forward validation
+[ ] Baseline сравнение
+[ ] Overfitting проверка (train vs test)
+[ ] Feature importance анализ
+[ ] SHAP explainability
+
+PRODUCTION:
+[ ] Model monitoring
+[ ] Drift detection
+[ ] Fallback на оригинальные сигналы
+[ ] Paper trading перед реальными деньгами!
+
+ЕСЛИ ХОТЬ ОДИН ПУНКТ НЕ ВЫПОЛНЕН — МОДЕЛЬ НЕ PRODUCTION READY!
+```

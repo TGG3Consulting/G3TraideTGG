@@ -1,0 +1,18 @@
+{
+  "min_volume_usd": 1000000,
+  "max_volume_usd": 50000000,
+  "max_depth_usd": 2000000.0,
+  "min_spread_pct": 0.0098,
+  "max_trade_count": 288268,
+  "min_trade_count": 3603,
+  "depth_critical": 50000,
+  "depth_high": 150000,
+  "depth_medium": 400000,
+  "spread_critical": 0.2,
+  "spread_high": 0.1,
+  "spread_elevated": 0.05,
+  "volume_very_low": 3000000,
+  "volume_low": 10000000,
+  "trades_few": 21620,
+  "trades_low": 57653
+}
