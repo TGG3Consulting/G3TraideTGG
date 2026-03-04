@@ -444,7 +444,7 @@ Examples:
                         help="Daily max drawdown %% - stop new trades for day if hit (default: 5)")
     parser.add_argument("--monthly-max-dd", type=float, default=20.0,
                         help="Monthly max drawdown %% - stop all trading if hit (default: 20)")
-    parser.add_argument("--output", type=str, default=r"G:\BinanceFriend\outputNEWARCH", help="Output directory")
+    parser.add_argument("--output", type=str, default="output", help="Output directory")
     parser.add_argument("--no-save", action="store_true", help="Disable saving signals to JSON")
     parser.add_argument("--no-xlsx", action="store_true", help="Disable XLSX export")
     parser.add_argument("--ml", action="store_true", help="Enable ML filtering of signals")

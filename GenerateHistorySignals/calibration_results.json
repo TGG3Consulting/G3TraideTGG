@@ -1,0 +1,54 @@
+[
+  {
+    "strategy": "ls",
+    "train_trades": 37597,
+    "test_trades": 10707,
+    "baseline_train_calmar": 8.184,
+    "baseline_test_calmar": 4.444,
+    "vol_filter_low": 6.0,
+    "vol_filter_low_calmar": 8.523,
+    "vol_filter_high": null,
+    "vol_filter_high_calmar": null,
+    "validation_status": "VALIDATED",
+    "improvement_pct": 4.1
+  },
+  {
+    "strategy": "mean",
+    "train_trades": 5116,
+    "test_trades": 1586,
+    "baseline_train_calmar": 4.248,
+    "baseline_test_calmar": 3.053,
+    "vol_filter_low": 5.0,
+    "vol_filter_low_calmar": 4.262,
+    "vol_filter_high": null,
+    "vol_filter_high_calmar": null,
+    "validation_status": "VALIDATED",
+    "improvement_pct": 0.3
+  },
+  {
+    "strategy": "momentum",
+    "train_trades": 52851,
+    "test_trades": 23837,
+    "baseline_train_calmar": 18.947,
+    "baseline_test_calmar": 4.697,
+    "vol_filter_low": 2.0,
+    "vol_filter_low_calmar": 19.442,
+    "vol_filter_high": null,
+    "vol_filter_high_calmar": null,
+    "validation_status": "VALIDATED",
+    "improvement_pct": 2.6
+  },
+  {
+    "strategy": "reversal",
+    "train_trades": 7075,
+    "test_trades": 2938,
+    "baseline_train_calmar": 1.453,
+    "baseline_test_calmar": 0.444,
+    "vol_filter_low": 7.5,
+    "vol_filter_low_calmar": 2.136,
+    "vol_filter_high": null,
+    "vol_filter_high_calmar": null,
+    "validation_status": "VALIDATED",
+    "improvement_pct": 47.0
+  }
+]
