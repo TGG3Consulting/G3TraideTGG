@@ -24,10 +24,12 @@ def load_all_xlsx(output_dir: Path) -> Dict[str, pd.DataFrame]:
     strategies = {}
 
     for xlsx_file in output_dir.glob("backtest_*.xlsx"):
-        # Extract strategy name from filename: backtest_momentum_20260304_...xlsx
+        # Extract strategy name from filename: backtest_momentum_ls_20260304_185339.xlsx
+        # Format: backtest_{strategy}_{YYYYMMDD}_{HHMMSS}.xlsx
         parts = xlsx_file.stem.split("_")
-        if len(parts) >= 2:
-            strategy = parts[1]
+        if len(parts) >= 4:
+            # Remove "backtest_" (first) and timestamp (last 2 parts)
+            strategy = "_".join(parts[1:-2])
 
             # Read trades sheet
             try:
@@ -189,19 +191,17 @@ def calibrate_strategy(
 
     best_low = find_best_threshold(low_results)
 
-    # Grid search vol_filter_high (only for mean_reversion)
-    best_high = None
-    if strategy == "mean_reversion":
-        print(f"\n--- vol_filter_high scan ---")
-        print(f"{'Threshold':>10} | {'Trades':>7} | {'Filtered':>8} | {'WinRate':>7} | {'NetPnL':>10} | {'MaxDD':>8} | {'Calmar':>7} | Status")
-        print("-" * 85)
+    # Grid search vol_filter_high (for all strategies)
+    print(f"\n--- vol_filter_high scan ---")
+    print(f"{'Threshold':>10} | {'Trades':>7} | {'Filtered':>8} | {'WinRate':>7} | {'NetPnL':>10} | {'MaxDD':>8} | {'Calmar':>7} | Status")
+    print("-" * 85)
 
-        high_results = grid_search_high(train_df, high_thresholds)
-        for r in high_results:
-            status_mark = "←BEST" if r == find_best_threshold(high_results) else ""
-            print(f"{r['threshold']:>9.1f}% | {r['trades']:>7} | {r['filtered_pct']:>7.1f}% | {r['win_rate']:>6.1f}% | {r['net_pnl']:>+9.1f}% | {r['max_dd']:>7.1f}% | {r['calmar']:>7.2f} | {r['status']} {status_mark}")
+    high_results = grid_search_high(train_df, high_thresholds)
+    for r in high_results:
+        status_mark = "←BEST" if r == find_best_threshold(high_results) else ""
+        print(f"{r['threshold']:>9.1f}% | {r['trades']:>7} | {r['filtered_pct']:>7.1f}% | {r['win_rate']:>6.1f}% | {r['net_pnl']:>+9.1f}% | {r['max_dd']:>7.1f}% | {r['calmar']:>7.2f} | {r['status']} {status_mark}")
 
-        best_high = find_best_threshold(high_results)
+    best_high = find_best_threshold(high_results)
 
     # Validate on test set
     print(f"\n--- VALIDATION (out-of-sample) ---")
