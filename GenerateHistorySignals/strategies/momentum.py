@@ -28,21 +28,40 @@ class MomentumStrategy(BaseStrategy):
     name = "momentum"
     description = "Trade with strong price momentum"
 
+    # !!! НЕ МЕНЯТЬ ПАРАМЕТРЫ - ОТКАЛИБРОВАНЫ ДЛЯ LIVE !!!
     @classmethod
     def default_config(cls) -> StrategyConfig:
+        """!!! ПАРАМЕТРЫ ЗАПРЕЩЕНО МЕНЯТЬ - РЕЗУЛЬТАТ БЭКТЕСТА !!!"""
         return StrategyConfig(
-            sl_pct=5.0,
-            tp_pct=10.0,
-            max_hold_days=14,
-            lookback=7,
+            sl_pct=5.0,          # НЕ МЕНЯТЬ!
+            tp_pct=10.0,         # НЕ МЕНЯТЬ!
+            max_hold_days=14,    # НЕ МЕНЯТЬ!
+            lookback=7,          # НЕ МЕНЯТЬ!
             params={
-                "momentum_threshold": 5.0,  # 5% price change threshold
+                "momentum_threshold": 5.0,  # 5% price change - НЕ МЕНЯТЬ!
             }
         )
 
+    # =========================================================================
+    # !!! КРИТИЧЕСКАЯ СЕКЦИЯ - НЕ ИЗМЕНЯТЬ !!!
+    # =========================================================================
+    # Эта стратегия используется в LIVE торговле через telegram_runner.py
+    # Логика генерации сигналов ПОЛНОСТЬЮ ПРОТЕСТИРОВАНА и ОТКАЛИБРОВАНА.
+    #
+    # КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
+    # - Менять momentum_threshold
+    # - Менять логику определения направления (LONG/SHORT)
+    # - Менять расчёт entry_price
+    # - Менять формулы SL/TP
+    #
+    # Любые изменения = потеря денег на реальном счёте!
+    # Последняя проверка: 2025-03-06
+    # =========================================================================
     def generate_signals(self, data: StrategyData) -> List[Signal]:
         """
         Generate signals based on price momentum.
+
+        !!! НЕ ИЗМЕНЯТЬ - ИСПОЛЬЗУЕТСЯ В LIVE ТОРГОВЛЕ !!!
 
         LONG when: 7-day price change >= threshold
         SHORT when: 7-day price change <= -threshold

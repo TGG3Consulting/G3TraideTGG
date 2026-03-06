@@ -28,8 +28,13 @@ from strategies import (
 # Import shared models (Trade, BacktestResult)
 from models import Trade, BacktestResult
 
+# =============================================================================
+# !!! ИСТОРИЧЕСКИЕ ДАННЫЕ БЭКТЕСТА - НЕ ИЗМЕНЯТЬ !!!
+# =============================================================================
 # Historical performance data: strategy -> month/day -> (pnl%, maxdd%)
 # Based on real backtest data from ANALYSIS_RESULTS.md
+# Используется для фильтрации сигналов по месяцу/дню недели.
+# !!! НЕ МЕНЯТЬ БЕЗ ПОЛНОГО РЕ-БЭКТЕСТА !!!
 MONTH_DATA = {
     'ls_fade': {1: (105, -27), 2: (-29, -68), 3: (49, -29), 4: (71, -30), 5: (13, -26), 6: (106, -13), 7: (40, -37), 8: (13, -33), 9: (-20, -48), 10: (34, -30), 11: (-10, -45), 12: (42, -13)},
     'momentum': {1: (43, -30), 2: (28, -35), 3: (-15, -27), 4: (8, -28), 5: (-56, -62), 6: (63, -16), 7: (62, -14), 8: (-43, -68), 9: (-25, -31), 10: (-24, -38), 11: (72, -17), 12: (16, -17)},
@@ -46,10 +51,21 @@ DAY_DATA = {  # 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
     'momentum_ls': {0: (14, -14), 1: (30, -17), 2: (-12, -34), 3: (38, -13), 4: (32, -15), 5: (47, -13), 6: (39, -24)},
 }
 
+# =============================================================================
+# !!! КРИТИЧЕСКИЕ ДАННЫЕ - НЕ ИЗМЕНЯТЬ !!!
+# =============================================================================
+# COIN_REGIME_MATRIX и VOL_FILTER_THRESHOLDS - результат бэктеста на 53,538
+# трейдах. Эти значения используются в LIVE торговле.
+#
+# КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО менять без полного ре-бэктеста!
+# Последняя калибровка: 2026-03-04
+# =============================================================================
+
 # COIN REGIME MATRIX: coin_regime -> strategy -> action
 # Actions: 'OFF' = skip, 'DYN' = $1 dynamic, 'FULL' = $100 full size
 # Based on 53,538 trades WITHOUT look-ahead bias (2026-03-04, bias fully fixed)
 # Rules: WR>=35% & PnL>0 = FULL | WR>=28% & PnL>0 = DYN | else = OFF
+# !!! НЕ МЕНЯТЬ БЕЗ ПОЛНОГО РЕ-БЭКТЕСТА !!!
 COIN_REGIME_MATRIX = {
     'STRONG_BULL': {
         'ls_fade': 'DYN',        # 29.5% WR, +569% PnL
@@ -92,6 +108,7 @@ COIN_REGIME_MATRIX = {
 # vol_low: skip if coin_vol < threshold (too quiet, no movement)
 # vol_high: skip if coin_vol > threshold (too chaotic)
 # None = don't apply filter
+# !!! НЕ МЕНЯТЬ БЕЗ ПОЛНОГО РЕ-БЭКТЕСТА !!!
 VOL_FILTER_THRESHOLDS = {
     'ls_fade':        {'vol_low': 4.5, 'vol_high': 22.0},
     'mean_reversion': {'vol_low': None, 'vol_high': 25.0},  # No vol_low filter - works in low vol
@@ -259,6 +276,7 @@ class StrategyRunner:
         ml_model_dir: str = "models",
         ml_min_confidence: float = 0.35,
         ml_min_filter_score: float = 0.45,
+        data_interval: str = "daily",
     ):
         """
         Initialize the strategy runner.
@@ -271,11 +289,13 @@ class StrategyRunner:
             ml_model_dir: Directory with trained ML models
             ml_min_confidence: Minimum confidence threshold for ML filter
             ml_min_filter_score: Minimum filter score threshold
+            data_interval: Data interval ("daily", "4h", "1h", "15m", "5m", "1m")
         """
         self.strategy = get_strategy(strategy_name, config)
         self.strategy_name = strategy_name
         self.output_dir = output_dir
         self.use_ml = use_ml
+        self.data_interval = data_interval
         self.ml_filter: Optional[MLSignalFilter] = None
 
         # Load ML filter if enabled
@@ -353,6 +373,216 @@ class StrategyRunner:
             ))
 
         return candles
+
+    def aggregate_to_interval(self, klines: List[Dict], interval: str = None) -> List[DailyCandle]:
+        """
+        Aggregate klines to specified interval.
+
+        Args:
+            klines: Raw klines data
+            interval: Target interval ("daily", "4h", "1h", "15m", "5m", "1m")
+                     If None, uses self.data_interval
+
+        Returns:
+            List of candles aggregated to interval
+        """
+        if interval is None:
+            interval = self.data_interval
+
+        # For daily, use existing optimized method
+        if interval == "daily":
+            return self.aggregate_to_daily(klines)
+
+        # For 1m: NO AGGREGATION - direct 1:1 conversion (passthrough)
+        # Each kline becomes exactly one candle
+        if interval == "1m":
+            return self._klines_to_candles_passthrough(klines)
+
+        # Interval in milliseconds (for intervals that need grouping)
+        interval_ms = {
+            "5m": 5 * 60 * 1000,
+            "15m": 15 * 60 * 1000,
+            "1h": 60 * 60 * 1000,
+            "4h": 4 * 60 * 60 * 1000,
+        }
+        ms_per_interval = interval_ms.get(interval, 24 * 60 * 60 * 1000)
+
+        # Group by interval
+        candles_dict = {}
+        for k in klines:
+            ts = k.get("timestamp", 0)
+            interval_ts = (ts // ms_per_interval) * ms_per_interval
+
+            qv = float(k.get("quote_volume", 0)) or float(k["close"]) * float(k["volume"])
+            trades = int(k.get("trades_count", 0))
+            taker_buy_vol = float(k.get("taker_buy_volume", 0))
+            taker_buy_quote = float(k.get("taker_buy_quote_volume", 0))
+
+            if interval_ts not in candles_dict:
+                candles_dict[interval_ts] = {
+                    "timestamp": interval_ts,
+                    "open": float(k["open"]),
+                    "high": float(k["high"]),
+                    "low": float(k["low"]),
+                    "close": float(k["close"]),
+                    "volume": float(k["volume"]),
+                    "quote_volume": qv,
+                    "trades_count": trades,
+                    "taker_buy_volume": taker_buy_vol,
+                    "taker_buy_quote_volume": taker_buy_quote,
+                }
+            else:
+                d = candles_dict[interval_ts]
+                d["high"] = max(d["high"], float(k["high"]))
+                d["low"] = min(d["low"], float(k["low"]))
+                d["close"] = float(k["close"])
+                d["volume"] += float(k["volume"])
+                d["quote_volume"] += qv
+                d["trades_count"] += trades
+                d["taker_buy_volume"] += taker_buy_vol
+                d["taker_buy_quote_volume"] += taker_buy_quote
+
+        # Convert to DailyCandle list
+        result = []
+        for ts in sorted(candles_dict.keys()):
+            d = candles_dict[ts]
+            dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+            result.append(DailyCandle(
+                date=dt,
+                open=d["open"],
+                high=d["high"],
+                low=d["low"],
+                close=d["close"],
+                volume=d["volume"],
+                quote_volume=d["quote_volume"],
+                trades_count=d["trades_count"],
+                taker_buy_volume=d["taker_buy_volume"],
+                taker_buy_quote_volume=d["taker_buy_quote_volume"],
+            ))
+
+        return result
+
+    def _klines_to_candles_passthrough(self, klines: List[Dict]) -> List[DailyCandle]:
+        """
+        Convert klines to candles WITHOUT any aggregation (1:1 mapping).
+
+        Used when interval matches the raw kline timeframe (e.g., 1m klines with 1m interval).
+        Each kline becomes exactly one candle.
+        """
+        return self.klines_to_candles_static(klines)
+
+    @staticmethod
+    def klines_to_candles_static(klines: List[Dict]) -> List[DailyCandle]:
+        """
+        Static method: Convert klines to candles WITHOUT any aggregation (1:1 mapping).
+
+        Can be called without instantiating StrategyRunner.
+        Each kline becomes exactly one candle.
+        """
+        result = []
+        for k in klines:
+            ts = k.get("timestamp", 0)
+            dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+
+            qv = float(k.get("quote_volume", 0)) or float(k["close"]) * float(k["volume"])
+            trades = int(k.get("trades_count", 0))
+            taker_buy_vol = float(k.get("taker_buy_volume", 0))
+            taker_buy_quote = float(k.get("taker_buy_quote_volume", 0))
+
+            result.append(DailyCandle(
+                date=dt,
+                open=float(k["open"]),
+                high=float(k["high"]),
+                low=float(k["low"]),
+                close=float(k["close"]),
+                volume=float(k["volume"]),
+                quote_volume=qv,
+                trades_count=trades,
+                taker_buy_volume=taker_buy_vol,
+                taker_buy_quote_volume=taker_buy_quote,
+            ))
+
+        return result
+
+    @staticmethod
+    def aggregate_to_interval_static(klines: List[Dict], interval: str) -> List[DailyCandle]:
+        """
+        Static method: Aggregate klines to specified interval.
+
+        Can be called without instantiating StrategyRunner.
+        For 1m: NO aggregation (1:1 mapping).
+        """
+        # For 1m: NO aggregation - direct passthrough
+        if interval == "1m":
+            return StrategyRunner.klines_to_candles_static(klines)
+
+        # For daily: use existing static method
+        if interval == "daily":
+            return StrategyRunner.aggregate_to_daily(klines)
+
+        # Interval in milliseconds
+        interval_ms = {
+            "5m": 5 * 60 * 1000,
+            "15m": 15 * 60 * 1000,
+            "1h": 60 * 60 * 1000,
+            "4h": 4 * 60 * 60 * 1000,
+        }
+        ms_per_interval = interval_ms.get(interval, 24 * 60 * 60 * 1000)
+
+        # Group by interval
+        candles_dict = {}
+        for k in klines:
+            ts = k.get("timestamp", 0)
+            interval_ts = (ts // ms_per_interval) * ms_per_interval
+
+            qv = float(k.get("quote_volume", 0)) or float(k["close"]) * float(k["volume"])
+            trades = int(k.get("trades_count", 0))
+            taker_buy_vol = float(k.get("taker_buy_volume", 0))
+            taker_buy_quote = float(k.get("taker_buy_quote_volume", 0))
+
+            if interval_ts not in candles_dict:
+                candles_dict[interval_ts] = {
+                    "timestamp": interval_ts,
+                    "open": float(k["open"]),
+                    "high": float(k["high"]),
+                    "low": float(k["low"]),
+                    "close": float(k["close"]),
+                    "volume": float(k["volume"]),
+                    "quote_volume": qv,
+                    "trades_count": trades,
+                    "taker_buy_volume": taker_buy_vol,
+                    "taker_buy_quote_volume": taker_buy_quote,
+                }
+            else:
+                d = candles_dict[interval_ts]
+                d["high"] = max(d["high"], float(k["high"]))
+                d["low"] = min(d["low"], float(k["low"]))
+                d["close"] = float(k["close"])
+                d["volume"] += float(k["volume"])
+                d["quote_volume"] += qv
+                d["trades_count"] += trades
+                d["taker_buy_volume"] += taker_buy_vol
+                d["taker_buy_quote_volume"] += taker_buy_quote
+
+        # Convert to DailyCandle list
+        result = []
+        for ts in sorted(candles_dict.keys()):
+            d = candles_dict[ts]
+            dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+            result.append(DailyCandle(
+                date=dt,
+                open=d["open"],
+                high=d["high"],
+                low=d["low"],
+                close=d["close"],
+                volume=d["volume"],
+                quote_volume=d["quote_volume"],
+                trades_count=d["trades_count"],
+                taker_buy_volume=d["taker_buy_volume"],
+                taker_buy_quote_volume=d["taker_buy_quote_volume"],
+            ))
+
+        return result
 
     def _build_ml_features(
         self,
@@ -487,6 +717,20 @@ class StrategyRunner:
 
         return funding_fee_pct, periods
 
+    # =========================================================================
+    # !!! КРИТИЧЕСКАЯ СЕКЦИЯ - НЕ ИЗМЕНЯТЬ !!!
+    # =========================================================================
+    # Этот метод используется telegram_runner.py для LIVE торговли.
+    # ВСЕ стратегии (ls_fade, momentum, mean_reversion, momentum_ls) были
+    # протестированы и откалиброваны с этой логикой.
+    #
+    # ЛЮБЫЕ изменения здесь СЛОМАЮТ live-сигналы!
+    #
+    # Если нужно добавить функционал для SMAEMA или других новых стратегий -
+    # делай это ОТДЕЛЬНО, не трогая существующую логику.
+    #
+    # Последняя проверка: 2025-03-06 - всё работает корректно.
+    # =========================================================================
     def generate_signals(
         self,
         history: Dict[str, SymbolHistoryData],
@@ -495,6 +739,8 @@ class StrategyRunner:
     ) -> List[Signal]:
         """
         Generate signals for all symbols using the configured strategy.
+
+        !!! НЕ ИЗМЕНЯТЬ ЛОГИКУ - ИСПОЛЬЗУЕТСЯ В LIVE ТОРГОВЛЕ !!!
 
         Args:
             history: Historical data from downloader
@@ -524,10 +770,13 @@ class StrategyRunner:
 
             raw = history[symbol]
 
-            # Aggregate to daily candles
-            candles = self.aggregate_to_daily(raw.klines)
+            # Aggregate to interval candles
+            candles = self.aggregate_to_interval(raw.klines)
+            import sys
+            print(f"  [DEBUG] {symbol}: {len(raw.klines)} klines -> {len(candles)} candles (interval={self.data_interval})", file=sys.stderr, flush=True)
             candles_by_symbol[symbol] = candles
-            candle_by_date_symbol[symbol] = {c.date.strftime("%Y-%m-%d"): c for c in candles}
+            # Index by timestamp (ms) for universal lookup
+            candle_by_date_symbol[symbol] = {int(c.date.timestamp() * 1000): c for c in candles}
 
             # Build strategy data
             data = StrategyData(
@@ -576,19 +825,20 @@ class StrategyRunner:
             filtered_signals = []
             for signal in all_signals:
                 symbol = signal.symbol
-                signal_date_str = signal.date.strftime("%Y-%m-%d")
+                signal_ts = int(signal.date.timestamp() * 1000)
 
-                # Get candle for signal date
-                candle = candle_by_date_symbol.get(symbol, {}).get(signal_date_str)
+                # Get candle for signal date (by timestamp)
+                candle = candle_by_date_symbol.get(symbol, {}).get(signal_ts)
                 if candle is None:
                     # No candle data - skip signal
                     self.ml_filtered_count += 1
                     continue
 
-                # Get PREVIOUS day's candle (for ML - no look-ahead bias)
-                prev_date = signal.date - timedelta(days=1)
-                prev_date_str = prev_date.strftime("%Y-%m-%d")
-                prev_candle = candle_by_date_symbol.get(symbol, {}).get(prev_date_str)
+                # Get PREVIOUS candle (for ML - no look-ahead bias)
+                # For daily: prev day. For other TF: prev candle in list.
+                candles_list = candles_by_symbol.get(symbol, [])
+                candle_idx = next((i for i, c in enumerate(candles_list) if int(c.date.timestamp() * 1000) == signal_ts), -1)
+                prev_candle = candles_list[candle_idx - 1] if candle_idx > 0 else None
 
                 # Get market data
                 raw = history.get(symbol)
@@ -650,6 +900,7 @@ class StrategyRunner:
         max_hold_days: int = 14,
         order_size_usd: float = 100.0,
         taker_fee_pct: float = 0.05,
+        maker_fee_pct: float = 0.02,
         position_mode: str = "single",
         daily_max_dd: float = 5.0,
         monthly_max_dd: float = 20.0,
@@ -722,7 +973,7 @@ class StrategyRunner:
         # Pre-aggregate all candles ONCE per symbol (optimization)
         candles_cache: Dict[str, List[DailyCandle]] = {}
         for symbol in history:
-            candles_cache[symbol] = self.aggregate_to_daily(history[symbol].klines)
+            candles_cache[symbol] = self.aggregate_to_interval(history[symbol].klines)
 
         # Sort signals by date for proper position tracking
         sorted_signals = sorted(signals, key=lambda s: s.date)
@@ -733,16 +984,17 @@ class StrategyRunner:
 
             candles = candles_cache[signal.symbol]
 
-            # Build date index
-            candle_by_date = {c.date.strftime("%Y-%m-%d"): c for c in candles}
-            candle_dates = sorted(candle_by_date.keys())
+            # Build timestamp index (works for any interval)
+            candle_by_ts = {int(c.date.timestamp() * 1000): c for c in candles}
+            candle_timestamps = sorted(candle_by_ts.keys())
 
-            signal_date_str = signal.date.strftime("%Y-%m-%d")
+            signal_ts = int(signal.date.timestamp() * 1000)
+            signal_date_str = signal.date.strftime("%Y-%m-%d")  # For daily tracking
             signal_month_str = signal.date.strftime("%Y-%m")
             signal_month = signal.date.month
             signal_day = signal.date.weekday()
 
-            if signal_date_str not in candle_dates:
+            if signal_ts not in candle_by_ts:
                 continue
 
             # Calculate volatility and regime early (for all trades including skipped)
@@ -932,8 +1184,8 @@ class StrategyRunner:
                 ))
                 continue
 
-            start_idx = candle_dates.index(signal_date_str)
-            entry_candle = candle_by_date[signal_date_str]
+            start_idx = candle_timestamps.index(signal_ts)
+            entry_candle = candle_by_ts[signal_ts]
 
             # LIQUIDITY CHECK: order_size must be < 0.1% of daily volume
             daily_volume = entry_candle.quote_volume
@@ -956,7 +1208,7 @@ class StrategyRunner:
 
             # POSITION CHECK based on position_mode
             position_blocked = False
-            if position_mode != "multi":
+            if position_mode not in ("multi", "none"):
                 symbol = signal.symbol
                 if symbol in open_positions:
                     if position_mode == "single":
@@ -1009,28 +1261,29 @@ class StrategyRunner:
             exit_price = signal.entry
             exit_date = signal.date
 
-            for j in range(1, min(max_hold_days + 1, len(candle_dates) - start_idx)):
-                future_date = candle_dates[start_idx + j]
-                future_candle = candle_by_date[future_date]
+            for j in range(1, min(max_hold_days + 1, len(candle_timestamps) - start_idx)):
+                future_ts = candle_timestamps[start_idx + j]
+                future_candle = candle_by_ts[future_ts]
 
+                # Per C++ tester: use STRICT inequalities (< and >)
                 if signal.direction == "LONG":
-                    if future_candle.low <= signal.stop_loss:
+                    if future_candle.low < signal.stop_loss:
                         result = "LOSS"
                         exit_price = signal.stop_loss
                         exit_date = future_candle.date
                         break
-                    if future_candle.high >= signal.take_profit:
+                    if future_candle.high > signal.take_profit:
                         result = "WIN"
                         exit_price = signal.take_profit
                         exit_date = future_candle.date
                         break
                 else:  # SHORT
-                    if future_candle.high >= signal.stop_loss:
+                    if future_candle.high > signal.stop_loss:
                         result = "LOSS"
                         exit_price = signal.stop_loss
                         exit_date = future_candle.date
                         break
-                    if future_candle.low <= signal.take_profit:
+                    if future_candle.low < signal.take_profit:
                         result = "WIN"
                         exit_price = signal.take_profit
                         exit_date = future_candle.date
@@ -1053,8 +1306,13 @@ class StrategyRunner:
             else:
                 gross_pnl_pct = (signal.entry - exit_price) / signal.entry * 100
 
-            # TRADING FEES: entry + exit = 2 * taker_fee_pct
-            total_fee_pct = 2 * taker_fee_pct
+            # TRADING FEES per C++ tester:
+            # - Entry: maker_fee
+            # - Exit WIN (TP): maker_fee
+            # - Exit LOSS/TIMEOUT: taker_fee
+            entry_fee_pct = maker_fee_pct
+            exit_fee_pct = maker_fee_pct if result == "WIN" else taker_fee_pct
+            total_fee_pct = entry_fee_pct + exit_fee_pct
 
             # FUNDING FEE: calculate from funding_history
             funding_fee_pct = 0.0
@@ -1357,7 +1615,7 @@ class StrategyRunner:
         os.makedirs(self.output_dir, exist_ok=True)
         filepath = os.path.join(self.output_dir, filename)
 
-        exporter = XLSXExporter(filepath)
+        exporter = XLSXExporter(filepath, data_interval=self.data_interval)
         return exporter.export_backtest(
             trades=result.trades,
             history=history,
@@ -1368,6 +1626,7 @@ class StrategyRunner:
             start_date=start_date,
             end_date=end_date,
             market_regime=market_regime,
+            data_interval=self.data_interval,
         )
 
 

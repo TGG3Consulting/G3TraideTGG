@@ -12,5 +12,8 @@ python-dateutil>=2.8.0
 # Excel export
 openpyxl>=3.1.0
 
+# Async HTTP client (for TradeBot integration)
+aiohttp>=3.8.0
+
 # Testing
 pytest>=7.0.0

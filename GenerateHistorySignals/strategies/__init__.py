@@ -40,6 +40,7 @@ from .momentum import MomentumStrategy
 from .reversal import ReversalStrategy
 from .momentum_ls import MomentumLSStrategy
 from .mean_reversion import MeanReversionStrategy
+from .smaema import SMAEMAStrategy
 
 
 # Registry of all available strategies
@@ -49,6 +50,7 @@ STRATEGY_REGISTRY: Dict[str, Type[BaseStrategy]] = {
     "reversal": ReversalStrategy,
     "momentum_ls": MomentumLSStrategy,
     "mean_reversion": MeanReversionStrategy,
+    "smaema": SMAEMAStrategy,
 }
 
 
@@ -113,6 +115,7 @@ __all__ = [
     "ReversalStrategy",
     "MomentumLSStrategy",
     "MeanReversionStrategy",
+    "SMAEMAStrategy",
     # Factory functions
     "get_strategy",
     "list_strategies",

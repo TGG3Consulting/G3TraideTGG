@@ -91,11 +91,14 @@ class BinanceHistoryDownloader:
     RETRY_DELAY = 5  # seconds
 
     # Supported data intervals
-    VALID_INTERVALS = ("daily", "5m", "1m")
+    VALID_INTERVALS = ("daily", "4h", "1h", "15m", "5m", "1m")
 
     # Interval mapping: our name -> Binance API parameter
     INTERVAL_MAP = {
         "daily": {"klines": "1d", "oi": "1d", "ls": "1d"},
+        "4h": {"klines": "4h", "oi": "5m", "ls": "5m"},
+        "1h": {"klines": "1h", "oi": "5m", "ls": "5m"},
+        "15m": {"klines": "15m", "oi": "5m", "ls": "5m"},
         "5m": {"klines": "5m", "oi": "5m", "ls": "5m"},
         "1m": {"klines": "1m", "oi": "5m", "ls": "5m"},  # OI/LS don't support 1m
     }

@@ -220,6 +220,9 @@ class MLSignalFilter:
         should_trade = True
         reason = "ML approved"
 
+        # Expected direction based on signal
+        expected_direction = 1 if direction == 'LONG' else -1
+
         if confidence < self.min_confidence:
             should_trade = False
             reason = f"Low confidence: {confidence:.1%} < {self.min_confidence:.1%}"
@@ -229,6 +232,10 @@ class MLSignalFilter:
         elif predicted_direction == 0:
             should_trade = False
             reason = "Direction model says SKIP"
+        elif predicted_direction != expected_direction:
+            should_trade = False
+            dir_name = "LONG" if predicted_direction == 1 else "SHORT"
+            reason = f"Direction mismatch: signal={direction}, ML predicted={dir_name}"
 
         return MLPrediction(
             should_trade=should_trade,

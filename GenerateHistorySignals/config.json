@@ -1,0 +1,25 @@
+{
+    "telegram": {
+        "bot_token": "8654782057:AAHOgFCVDjIxjdPoABTBQlIUqPQ0lKwWB_o",
+        "chat_id": "-1003883956458",
+        "admin_ids": []
+    },
+    "coinalyze_api_key": "adb282f9-7e9e-4b6c-a669-b01c0304d506",
+    "strategy_params": {
+        "ls_extreme": 0.65,
+        "momentum_threshold": 5.0,
+        "oversold_threshold": -10.0,
+        "overbought_threshold": 15.0,
+        "crowd_bearish": 0.55,
+        "crowd_bullish": 0.60,
+        "ls_confirm": 0.60
+    },
+    "defaults": {
+        "sl_pct": 4.0,
+        "tp_pct": 10.0,
+        "max_hold_days": 14,
+        "dedup_days": 3,
+        "taker_fee_pct": 0.05,
+        "coin_regime_lookback": 14
+    }
+}

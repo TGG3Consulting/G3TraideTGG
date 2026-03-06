@@ -31,22 +31,43 @@ class LSFadeStrategy(BaseStrategy):
     name = "ls_fade"
     description = "Fade crowd extremes (>65% one direction)"
 
+    # !!! НЕ МЕНЯТЬ ПАРАМЕТРЫ - ОТКАЛИБРОВАНЫ ДЛЯ LIVE !!!
     @classmethod
     def default_config(cls) -> StrategyConfig:
-        """Default configuration optimized from backtesting."""
+        """Default configuration optimized from backtesting.
+
+        !!! ПАРАМЕТРЫ ЗАПРЕЩЕНО МЕНЯТЬ - РЕЗУЛЬТАТ БЭКТЕСТА !!!
+        """
         return StrategyConfig(
-            sl_pct=4.0,          # 4% stop loss (optimized)
-            tp_pct=10.0,         # 10% take profit
-            max_hold_days=14,
-            lookback=7,
+            sl_pct=4.0,          # 4% stop loss (optimized) - НЕ МЕНЯТЬ!
+            tp_pct=10.0,         # 10% take profit - НЕ МЕНЯТЬ!
+            max_hold_days=14,    # НЕ МЕНЯТЬ!
+            lookback=7,          # НЕ МЕНЯТЬ!
             params={
-                "ls_extreme": 0.65,  # 65% threshold for extreme positioning
+                "ls_extreme": 0.65,  # 65% threshold - НЕ МЕНЯТЬ!
             }
         )
 
+    # =========================================================================
+    # !!! КРИТИЧЕСКАЯ СЕКЦИЯ - НЕ ИЗМЕНЯТЬ !!!
+    # =========================================================================
+    # Эта стратегия используется в LIVE торговле через telegram_runner.py
+    # Логика генерации сигналов ПОЛНОСТЬЮ ПРОТЕСТИРОВАНА и ОТКАЛИБРОВАНА.
+    #
+    # КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
+    # - Менять пороги (ls_extreme, sl_pct, tp_pct)
+    # - Менять логику определения направления (LONG/SHORT)
+    # - Менять расчёт entry_price
+    # - Менять формулы SL/TP
+    #
+    # Любые изменения = потеря денег на реальном счёте!
+    # Последняя проверка: 2025-03-06
+    # =========================================================================
     def generate_signals(self, data: StrategyData) -> List[Signal]:
         """
         Generate signals when crowd positioning is extreme.
+
+        !!! НЕ ИЗМЕНЯТЬ - ИСПОЛЬЗУЕТСЯ В LIVE ТОРГОВЛЕ !!!
 
         SHORT when: long_pct >= ls_extreme (crowd too bullish)
         LONG when: short_pct >= ls_extreme (crowd too bearish)

@@ -189,10 +189,11 @@ TRADES_COLUMNS = [
 class XLSXExporter:
     """Export backtest results to XLSX with all data."""
 
-    def __init__(self, output_path: str):
+    def __init__(self, output_path: str, data_interval: str = "daily"):
         if not OPENPYXL_AVAILABLE:
             raise ImportError("openpyxl is required for XLSX export. Install with: pip install openpyxl")
         self.output_path = output_path
+        self.data_interval = data_interval
         self.wb = openpyxl.Workbook()
         # Remove default sheet
         if "Sheet" in self.wb.sheetnames:
@@ -209,6 +210,7 @@ class XLSXExporter:
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         market_regime: Optional[Dict[str, Any]] = None,
+        data_interval: str = None,
     ) -> str:
         """
         Export ALL data to XLSX.
@@ -223,11 +225,14 @@ class XLSXExporter:
             start_date: Backtest start date
             end_date: Backtest end date
             market_regime: Market regime detection result
+            data_interval: Data interval (overrides __init__ if provided)
 
         Returns:
             Path to saved XLSX file
         """
-        self._write_trades_sheet(trades, history, order_size_usd)
+        # Use provided interval or fall back to instance interval
+        interval = data_interval if data_interval is not None else self.data_interval
+        self._write_trades_sheet(trades, history, order_size_usd, interval)
         self._write_summary_sheet(result, order_size_usd, market_regime)
         self._write_config_sheet(config, strategy_name, start_date, end_date, order_size_usd, market_regime)
 
@@ -241,12 +246,13 @@ class XLSXExporter:
         trades: List[Trade],
         history: Dict[str, SymbolHistoryData],
         order_size_usd: float,
+        data_interval: str = "daily",
     ) -> None:
         """Write Trades sheet with all trade data."""
         ws = self.wb.create_sheet("Trades")
 
-        # Build candle cache for lookups
-        candles_cache = self._build_candles_cache(history)
+        # Build candle cache for lookups (respecting data_interval - NO aggregation for 1m)
+        candles_cache = self._build_candles_cache(history, data_interval)
 
         # Header row
         headers = [FIELD_NAMES.get(col, col) for col in TRADES_COLUMNS]
@@ -425,70 +431,27 @@ class XLSXExporter:
     def _build_candles_cache(
         self,
         history: Dict[str, SymbolHistoryData],
+        data_interval: str = "daily",
     ) -> Dict[str, Dict[str, DailyCandle]]:
-        """Build candle lookup cache by symbol and date."""
+        """Build candle lookup cache by symbol and date/timestamp.
+
+        Uses interval-aware aggregation from StrategyRunner (static method).
+        For 1m interval: NO aggregation (1:1 mapping).
+        For other intervals: aggregates to that interval.
+        """
+        from strategy_runner import StrategyRunner
+
         cache = {}
         for symbol, data in history.items():
-            candles = self._aggregate_to_daily(data.klines)
-            cache[symbol] = {c.date.strftime("%Y-%m-%d"): c for c in candles}
-        return cache
-
-    @staticmethod
-    def _aggregate_to_daily(klines: List[Dict]) -> List[DailyCandle]:
-        """Aggregate 1-minute klines to daily candles with ALL available data."""
-        from datetime import timezone as tz
-        daily = {}
-
-        for k in klines:
-            ts = k.get("timestamp", 0)
-            dt = datetime.fromtimestamp(ts / 1000, tz=tz.utc)
-            date_key = dt.strftime("%Y-%m-%d")
-
-            qv = float(k.get("quote_volume", 0)) or float(k["close"]) * float(k["volume"])
-            trades = int(k.get("trades_count", 0))
-            taker_buy_vol = float(k.get("taker_buy_volume", 0))
-            taker_buy_quote = float(k.get("taker_buy_quote_volume", 0))
-
-            if date_key not in daily:
-                daily[date_key] = {
-                    "date": dt.replace(hour=0, minute=0, second=0),
-                    "open": float(k["open"]),
-                    "high": float(k["high"]),
-                    "low": float(k["low"]),
-                    "close": float(k["close"]),
-                    "volume": float(k["volume"]),
-                    "quote_volume": qv,
-                    "trades_count": trades,
-                    "taker_buy_volume": taker_buy_vol,
-                    "taker_buy_quote_volume": taker_buy_quote,
-                }
+            # Use static method - NO aggregation for 1m
+            candles = StrategyRunner.aggregate_to_interval_static(data.klines, data_interval)
+            # Use ISO format with time for non-daily intervals
+            if data_interval == "daily":
+                cache[symbol] = {c.date.strftime("%Y-%m-%d"): c for c in candles}
             else:
-                daily[date_key]["high"] = max(daily[date_key]["high"], float(k["high"]))
-                daily[date_key]["low"] = min(daily[date_key]["low"], float(k["low"]))
-                daily[date_key]["close"] = float(k["close"])
-                daily[date_key]["volume"] += float(k["volume"])
-                daily[date_key]["quote_volume"] += qv
-                daily[date_key]["trades_count"] += trades
-                daily[date_key]["taker_buy_volume"] += taker_buy_vol
-                daily[date_key]["taker_buy_quote_volume"] += taker_buy_quote
-
-        candles = []
-        for date_key in sorted(daily.keys()):
-            d = daily[date_key]
-            candles.append(DailyCandle(
-                date=d["date"],
-                open=d["open"],
-                high=d["high"],
-                low=d["low"],
-                close=d["close"],
-                volume=d["volume"],
-                quote_volume=d["quote_volume"],
-                trades_count=d["trades_count"],
-                taker_buy_volume=d["taker_buy_volume"],
-                taker_buy_quote_volume=d["taker_buy_quote_volume"],
-            ))
-
-        return candles
+                # For intraday, use full ISO timestamp as key
+                cache[symbol] = {c.date.isoformat(): c for c in candles}
+        return cache
 
     def _build_trade_row(
         self,

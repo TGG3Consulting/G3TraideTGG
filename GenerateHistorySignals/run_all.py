@@ -20,6 +20,7 @@ Options:
 """
 
 import sys
+import os
 import io
 import argparse
 from datetime import datetime, timezone
@@ -37,6 +38,10 @@ from strategy_runner import StrategyRunner
 
 # All available strategies
 ALL_STRATEGIES = ['ls_fade', 'momentum', 'reversal', 'mean_reversion', 'momentum_ls']
+ALL_STRATEGIES_WITH_SMAEMA = ALL_STRATEGIES + ['smaema']
+
+# SMAEMA required parameters
+SMAEMA_REQUIRED_PARAMS = ['fast_type', 'fast_period', 'slow_type', 'slow_period', 'offset_pct', 'order_lifetime']
 
 
 def detect_market_regime(history: Dict[str, Any]) -> Dict[str, Any]:
@@ -113,6 +118,7 @@ def run_all_strategies(
     position_mode: str = "single",
     order_size_usd: float = 100.0,
     taker_fee_pct: float = 0.05,
+    maker_fee_pct: float = 0.02,
     output_dir: str = "output",
     save_signals: bool = False,
     export_xlsx: bool = False,
@@ -132,6 +138,8 @@ def run_all_strategies(
     coin_regime_lookback: int = 14,
     vol_filter_low_enabled: bool = False,
     vol_filter_high_enabled: bool = False,
+    strategies: Optional[List[str]] = None,
+    smaema_params: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Run all strategies on given symbols and date range.
@@ -151,6 +159,7 @@ def run_all_strategies(
     print(f"Dedup Days:  {dedup_days}")
     print(f"Order Size:  ${order_size_usd:.0f}")
     print(f"Taker Fee:   {taker_fee_pct}%")
+    print(f"Maker Fee:   {maker_fee_pct}%")
     print(f"Position:    {position_mode}")
     print(f"Daily MaxDD: {daily_max_dd}%")
     print(f"Month MaxDD: {monthly_max_dd}%")
@@ -175,7 +184,10 @@ def run_all_strategies(
     if vol_filter_high_enabled:
         vol_filter_status.append("HIGH")
     print(f"Vol Filter:  {' + '.join(vol_filter_status) + ' (per-strategy thresholds)' if vol_filter_status else 'Disabled'}")
-    print(f"Strategies:  {len(ALL_STRATEGIES)}")
+
+    # Determine strategies to run
+    strategies_to_run = strategies if strategies else ALL_STRATEGIES
+    print(f"Strategies:  {len(strategies_to_run)} ({', '.join(strategies_to_run)})")
     print("=" * 80)
     print()
 
@@ -200,24 +212,30 @@ def run_all_strategies(
 
     results = []
 
-    for i, strat_name in enumerate(ALL_STRATEGIES, 1):
-        print(f"  [{i}/{len(ALL_STRATEGIES)}] {strat_name}...", end=" ", flush=True)
+    for i, strat_name in enumerate(strategies_to_run, 1):
+        print(f"  [{i}/{len(strategies_to_run)}] {strat_name}...", end=" ", flush=True)
 
-        # Build config
+        # Build config params
+        config_params = {
+            "ls_extreme": 0.65,
+            "momentum_threshold": 5.0,
+            "oversold_threshold": -10.0,
+            "overbought_threshold": 15.0,
+            "crowd_bearish": 0.55,
+            "crowd_bullish": 0.60,
+            "ls_confirm": 0.60,
+        }
+
+        # Add SMAEMA params if running smaema
+        if strat_name == 'smaema' and smaema_params:
+            config_params.update(smaema_params)
+
         config = StrategyConfig(
             sl_pct=sl_pct,
             tp_pct=tp_pct,
             max_hold_days=max_hold_days,
             lookback=7,
-            params={
-                "ls_extreme": 0.65,
-                "momentum_threshold": 5.0,
-                "oversold_threshold": -10.0,
-                "overbought_threshold": 15.0,
-                "crowd_bearish": 0.55,
-                "crowd_bullish": 0.60,
-                "ls_confirm": 0.60,
-            }
+            params=config_params
         )
 
         # Create runner
@@ -227,6 +245,7 @@ def run_all_strategies(
             output_dir=output_dir,
             use_ml=use_ml,
             ml_model_dir=ml_model_dir,
+            data_interval=data_interval,
         )
 
         # Generate signals (suppress output)
@@ -242,6 +261,7 @@ def run_all_strategies(
                 max_hold_days=max_hold_days,
                 order_size_usd=order_size_usd,
                 taker_fee_pct=taker_fee_pct,
+                maker_fee_pct=maker_fee_pct,
                 position_mode=position_mode,
                 daily_max_dd=daily_max_dd,
                 monthly_max_dd=monthly_max_dd,
@@ -285,6 +305,14 @@ def run_all_strategies(
             )
             print(f"[DEBUG] XLSX done: {xlsx_path}", flush=True)
             print(f"XLSX: {xlsx_path}", end=" ", flush=True)
+
+            # For SMAEMA: also export in tester_3 format
+            if strat_name == "smaema":
+                from tester3_exporter import export_tester3_format
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                tester3_path = os.path.join(output_dir, f"trades_tester3_{strat_name}_{timestamp}.xlsx")
+                export_tester3_format(result.trades, tester3_path, order_size_usd)
+                print(f"\nTester3 format: {tester3_path}", flush=True)
 
         # Store result
         results.append({
@@ -437,12 +465,13 @@ Examples:
     parser.add_argument("--tp", type=float, default=10.0, help="Take Profit %% (default: 10)")
     parser.add_argument("--max-hold", type=int, default=14, help="Max hold days (default: 14)")
     parser.add_argument("--dedup-days", type=int, default=3, help="Chain grouping threshold days (default: 3)")
-    parser.add_argument("--position-mode", type=str, default="single", choices=["single", "direction", "multi"],
-                        help="Position mode: single (1 per coin), direction (1 per direction), multi (default: single)")
+    parser.add_argument("--position-mode", type=str, default="single", choices=["single", "direction", "multi", "none"],
+                        help="Position mode: single (1 per coin), direction (1 per direction), multi, none (default: single)")
     parser.add_argument("--order-size", type=float, default=100.0, help="Order size in USDT (default: 100)")
     parser.add_argument("--taker-fee", type=float, default=0.05, help="Taker fee %% per side (default: 0.05)")
-    parser.add_argument("--data-interval", type=str, default="daily", choices=["daily", "5m", "1m"],
-                        help="Data granularity: daily (1d candles), 5m, or 1m (default: daily)")
+    parser.add_argument("--maker-fee", type=float, default=0.02, help="Maker fee %% per side (default: 0.02)")
+    parser.add_argument("--data-interval", type=str, default="daily", choices=["daily", "4h", "1h", "15m", "5m", "1m"],
+                        help="Data granularity: daily, 4h, 1h, 15m, 5m, or 1m (default: daily)")
     parser.add_argument("--daily-max-dd", type=float, default=5.0,
                         help="Daily max drawdown %% - stop new trades for day if hit (default: 5)")
     parser.add_argument("--monthly-max-dd", type=float, default=20.0,
@@ -464,7 +493,80 @@ Examples:
     parser.add_argument("--vol-filter-low", action="store_true", help="Enable LOW volatility filter (uses per-strategy thresholds from VOL_FILTER_THRESHOLDS)")
     parser.add_argument("--vol-filter-high", action="store_true", help="Enable HIGH volatility filter (uses per-strategy thresholds from VOL_FILTER_THRESHOLDS)")
 
+    # Strategy selection
+    parser.add_argument("--strategies", type=str, default="all",
+                        help="Strategies: all or comma-separated (ls_fade,momentum,reversal,mean_reversion,momentum_ls,smaema)")
+    parser.add_argument("--strategy", type=str, default=None,
+                        help="Single strategy to run (e.g., smaema)")
+
+    # SMAEMA-specific parameters (--bar is alias for --data-interval with numeric support)
+    parser.add_argument("--bar", type=str, default=None, help="Timeframe: 1, 5, 15, 60, 240, daily (alias for --data-interval)")
+    parser.add_argument("--fast-type", type=str, default=None, help="SMAEMA fast MA type: SMA or EMA")
+    parser.add_argument("--fast-period", type=int, default=None, help="SMAEMA fast MA period")
+    parser.add_argument("--slow-type", type=str, default=None, help="SMAEMA slow MA type: SMA or EMA")
+    parser.add_argument("--slow-period", type=int, default=None, help="SMAEMA slow MA period")
+    parser.add_argument("--offset-pct", type=float, default=None, help="SMAEMA entry offset %% (+ above, - below)")
+    parser.add_argument("--order-lifetime", type=int, default=None, help="SMAEMA candles to wait for entry")
+
     args = parser.parse_args()
+
+    # Convert --bar to interval format and use as data_interval if provided
+    if args.bar is not None:
+        BAR_CONVERSION = {
+            "1": "1m", "5": "5m", "15": "15m", "60": "1h", "240": "4h",
+            "1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h",
+            "daily": "daily"
+        }
+        if args.bar not in BAR_CONVERSION:
+            print(f"ERROR: Invalid --bar value: {args.bar}")
+            print(f"Valid values: 1, 5, 15, 60, 240, daily (or 1m, 5m, 15m, 1h, 4h)")
+            return 1
+        args.data_interval = BAR_CONVERSION[args.bar]
+
+    # Handle --strategy (singular) vs --strategies
+    if args.strategy:
+        # Single strategy mode
+        selected_strategies = [args.strategy.lower()]
+    elif args.strategies.lower() == 'all':
+        # All strategies mode - SMAEMA included only if params provided
+        selected_strategies = ALL_STRATEGIES.copy()
+    else:
+        # Comma-separated list
+        selected_strategies = [s.strip().lower() for s in args.strategies.split(',') if s.strip()]
+
+    # SMAEMA params check
+    smaema_params = {
+        'fast_type': args.fast_type,
+        'fast_period': args.fast_period,
+        'slow_type': args.slow_type,
+        'slow_period': args.slow_period,
+        'offset_pct': args.offset_pct,
+        'order_lifetime': args.order_lifetime,
+    }
+    smaema_params_available = all(v is not None for v in smaema_params.values())
+    smaema_missing_params = [k for k, v in smaema_params.items() if v is None]
+
+    # Handle SMAEMA inclusion
+    if 'smaema' in selected_strategies:
+        if not smaema_params_available:
+            if args.strategy and args.strategy.lower() == 'smaema':
+                # ERROR: explicit --strategy smaema without params
+                print(f"ERROR: Missing required SMAEMA parameters: {', '.join('--' + p.replace('_', '-') for p in smaema_missing_params)}")
+                print(f"SMAEMA strategy requires all parameters to be specified.")
+                return 1
+            else:
+                # WARNING: smaema in list but no params - skip it
+                print(f"WARNING: SMAEMA strategy skipped - missing required parameters.")
+                print(f"         Missing: {', '.join('--' + p.replace('_', '-') for p in smaema_missing_params)}")
+                selected_strategies.remove('smaema')
+    elif args.strategies.lower() == 'all' and smaema_params_available:
+        # All strategies with SMAEMA params provided - include SMAEMA
+        selected_strategies.append('smaema')
+        print(f"SMAEMA included: params OK")
+
+    if not selected_strategies:
+        print("[ERROR] No strategies to run")
+        return 1
 
     # Parse dates
     try:
@@ -491,7 +593,7 @@ Examples:
         print("[ERROR] No symbols provided")
         return 1
 
-    # Run all strategies
+    # Run strategies
     results = run_all_strategies(
         symbols=symbols,
         start=start,
@@ -503,6 +605,7 @@ Examples:
         position_mode=args.position_mode,
         order_size_usd=args.order_size,
         taker_fee_pct=args.taker_fee,
+        maker_fee_pct=args.maker_fee,
         output_dir=args.output,
         save_signals=not args.no_save,
         export_xlsx=not args.no_xlsx,
@@ -522,6 +625,8 @@ Examples:
         coin_regime_lookback=args.coin_regime_lookback,
         vol_filter_low_enabled=args.vol_filter_low,
         vol_filter_high_enabled=args.vol_filter_high,
+        strategies=selected_strategies,
+        smaema_params=smaema_params if smaema_params_available else None,
     )
 
     # Print results

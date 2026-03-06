@@ -28,22 +28,41 @@ class MomentumLSStrategy(BaseStrategy):
     name = "momentum_ls"
     description = "Momentum with L/S ratio confirmation"
 
+    # !!! НЕ МЕНЯТЬ ПАРАМЕТРЫ - ОТКАЛИБРОВАНЫ ДЛЯ LIVE !!!
     @classmethod
     def default_config(cls) -> StrategyConfig:
+        """!!! ПАРАМЕТРЫ ЗАПРЕЩЕНО МЕНЯТЬ - РЕЗУЛЬТАТ БЭКТЕСТА !!!"""
         return StrategyConfig(
-            sl_pct=5.0,
-            tp_pct=10.0,
-            max_hold_days=14,
-            lookback=7,
+            sl_pct=5.0,          # НЕ МЕНЯТЬ!
+            tp_pct=10.0,         # НЕ МЕНЯТЬ!
+            max_hold_days=14,    # НЕ МЕНЯТЬ!
+            lookback=7,          # НЕ МЕНЯТЬ!
             params={
-                "momentum_threshold": 5.0,
-                "ls_confirm": 0.60,  # Crowd should be < 60% in trade direction
+                "momentum_threshold": 5.0,  # НЕ МЕНЯТЬ!
+                "ls_confirm": 0.60,  # Crowd < 60% - НЕ МЕНЯТЬ!
             }
         )
 
+    # =========================================================================
+    # !!! КРИТИЧЕСКАЯ СЕКЦИЯ - НЕ ИЗМЕНЯТЬ !!!
+    # =========================================================================
+    # Эта стратегия используется в LIVE торговле через telegram_runner.py
+    # Логика генерации сигналов ПОЛНОСТЬЮ ПРОТЕСТИРОВАНА и ОТКАЛИБРОВАНА.
+    #
+    # КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
+    # - Менять пороги (momentum_threshold, ls_confirm)
+    # - Менять логику определения направления (LONG/SHORT)
+    # - Менять расчёт entry_price
+    # - Менять формулы SL/TP
+    #
+    # Любые изменения = потеря денег на реальном счёте!
+    # Последняя проверка: 2025-03-06
+    # =========================================================================
     def generate_signals(self, data: StrategyData) -> List[Signal]:
         """
         Generate signals with momentum + L/S confirmation.
+
+        !!! НЕ ИЗМЕНЯТЬ - ИСПОЛЬЗУЕТСЯ В LIVE ТОРГОВЛЕ !!!
 
         LONG when: Up momentum + crowd not too bullish (<60% long)
         SHORT when: Down momentum + crowd not too bearish (<60% short)

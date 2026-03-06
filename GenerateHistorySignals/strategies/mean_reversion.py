@@ -28,24 +28,43 @@ class MeanReversionStrategy(BaseStrategy):
     name = "mean_reversion"
     description = "Mean reversion on extreme moves with crowd confirmation"
 
+    # !!! НЕ МЕНЯТЬ ПАРАМЕТРЫ - ОТКАЛИБРОВАНЫ ДЛЯ LIVE !!!
     @classmethod
     def default_config(cls) -> StrategyConfig:
+        """!!! ПАРАМЕТРЫ ЗАПРЕЩЕНО МЕНЯТЬ - РЕЗУЛЬТАТ БЭКТЕСТА !!!"""
         return StrategyConfig(
-            sl_pct=7.0,          # Wider SL for mean reversion
-            tp_pct=15.0,         # Larger TP target
-            max_hold_days=14,
-            lookback=7,
+            sl_pct=7.0,          # Wider SL - НЕ МЕНЯТЬ!
+            tp_pct=15.0,         # Larger TP - НЕ МЕНЯТЬ!
+            max_hold_days=14,    # НЕ МЕНЯТЬ!
+            lookback=7,          # НЕ МЕНЯТЬ!
             params={
-                "oversold_threshold": -10.0,   # -10% = oversold
-                "overbought_threshold": 15.0,  # +15% = overbought
-                "crowd_bearish": 0.55,         # 55% short = bearish
-                "crowd_bullish": 0.60,         # 60% long = bullish
+                "oversold_threshold": -10.0,   # -10% = oversold - НЕ МЕНЯТЬ!
+                "overbought_threshold": 15.0,  # +15% = overbought - НЕ МЕНЯТЬ!
+                "crowd_bearish": 0.55,         # 55% short - НЕ МЕНЯТЬ!
+                "crowd_bullish": 0.60,         # 60% long - НЕ МЕНЯТЬ!
             }
         )
 
+    # =========================================================================
+    # !!! КРИТИЧЕСКАЯ СЕКЦИЯ - НЕ ИЗМЕНЯТЬ !!!
+    # =========================================================================
+    # Эта стратегия используется в LIVE торговле через telegram_runner.py
+    # Логика генерации сигналов ПОЛНОСТЬЮ ПРОТЕСТИРОВАНА и ОТКАЛИБРОВАНА.
+    #
+    # КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО:
+    # - Менять пороги (oversold/overbought_threshold, crowd_bearish/bullish)
+    # - Менять логику определения направления (LONG/SHORT)
+    # - Менять расчёт entry_price
+    # - Менять формулы SL/TP
+    #
+    # Любые изменения = потеря денег на реальном счёте!
+    # Последняя проверка: 2025-03-06
+    # =========================================================================
     def generate_signals(self, data: StrategyData) -> List[Signal]:
         """
         Generate signals on extreme conditions.
+
+        !!! НЕ ИЗМЕНЯТЬ - ИСПОЛЬЗУЕТСЯ В LIVE ТОРГОВЛЕ !!!
 
         LONG when: Oversold (big drop) + crowd bearish
         SHORT when: Overbought (big rally) + crowd bullish

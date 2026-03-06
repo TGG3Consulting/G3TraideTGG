@@ -178,23 +178,27 @@ class HybridHistoryDownloader:
             data.funding_history = self.binance._download_funding_history(symbol, start_ms, end_ms)
 
             # 3. OI History - hybrid
+            # Note: Coinalyze API only supports daily interval for OI
+            # Binance supports oi_int from INTERVAL_MAP (5m minimum)
             if use_coinalyze and self.coinalyze:
                 data.oi_history = self.coinalyze.download_oi_history(
                     symbol=symbol,
                     start_time=start_time,
                     end_time=end_time,
-                    interval="daily"
+                    interval="daily"  # Coinalyze API limitation
                 )
             else:
                 data.oi_history = self.binance._download_oi_history(symbol, start_ms, end_ms)
 
             # 4. L/S Ratio - hybrid
+            # Note: Coinalyze API only supports daily interval for L/S
+            # Binance supports ls_int from INTERVAL_MAP (5m minimum)
             if use_coinalyze and self.coinalyze:
                 data.ls_ratio_history = self.coinalyze.download_ls_ratio_history(
                     symbol=symbol,
                     start_time=start_time,
                     end_time=end_time,
-                    interval="daily"
+                    interval="daily"  # Coinalyze API limitation
                 )
             else:
                 data.ls_ratio_history = self.binance._download_ls_ratio(symbol, start_ms, end_ms)
@@ -253,20 +257,30 @@ class HybridHistoryDownloader:
         oi_int = interval_map["oi"]
         ls_int = interval_map["ls"]
 
+        # Determine actual date ranges (handle case where end_time < binance_cutoff)
+        has_recent_period = end_time > binance_cutoff
+        historical_end = min(binance_cutoff, end_time)
+
         print(f"\n{'='*60}", flush=True)
         print(f"HYBRID DOWNLOAD WITH BACKFILL", flush=True)
         print(f"{'='*60}", flush=True)
         print(f"Full period: {start_time.strftime('%Y-%m-%d')} -> {end_time.strftime('%Y-%m-%d')}", flush=True)
         print(f"Binance cutoff: {binance_cutoff.strftime('%Y-%m-%d')}", flush=True)
+        print(f"Data interval: {self.data_interval} (klines={klines_int}, oi={oi_int}, ls={ls_int})", flush=True)
         print(f"", flush=True)
         print(f"Strategy:", flush=True)
-        print(f"  Historical ({start_time.strftime('%Y-%m-%d')} - {binance_cutoff.strftime('%Y-%m-%d')}): Coinalyze daily", flush=True)
-        print(f"  Recent ({binance_cutoff.strftime('%Y-%m-%d')} - {end_time.strftime('%Y-%m-%d')}): Binance {oi_int}", flush=True)
+        print(f"  Klines: Binance {klines_int} (full period)", flush=True)
+        print(f"  OI/L/S Historical ({start_time.strftime('%Y-%m-%d')} - {historical_end.strftime('%Y-%m-%d')}): Coinalyze daily", flush=True)
+        if has_recent_period:
+            print(f"  OI/L/S Recent ({binance_cutoff.strftime('%Y-%m-%d')} - {end_time.strftime('%Y-%m-%d')}): Binance {oi_int}", flush=True)
+        else:
+            print(f"  OI/L/S Recent: N/A (end_time before cutoff)", flush=True)
         print(f"{'='*60}\n", flush=True)
 
         start_ms = int(start_time.timestamp() * 1000)
         end_ms = int(end_time.timestamp() * 1000)
         cutoff_ms = int(binance_cutoff.timestamp() * 1000)
+        historical_end_ms = int(historical_end.timestamp() * 1000)
 
         results = {}
 
@@ -276,30 +290,38 @@ class HybridHistoryDownloader:
 
             data = SymbolHistoryData(symbol=symbol)
 
-            # 1. Klines - full period from Binance
+            # 1. Klines - full period from Binance (respects data_interval)
             data.klines = self.binance._download_klines(symbol, start_ms, end_ms)
 
             # 2. Funding - full period from Binance
             data.funding_history = self.binance._download_funding_history(symbol, start_ms, end_ms)
 
-            # 3. OI - merge Coinalyze (old) + Binance (recent)
+            # 3. OI - merge Coinalyze (old) + Binance (recent) if applicable
+            # Note: Coinalyze only supports daily, Binance supports 5m minimum
             oi_historical = self.coinalyze.download_oi_history(
                 symbol=symbol,
                 start_time=start_time,
-                end_time=binance_cutoff,
-                interval="daily"
+                end_time=historical_end,
+                interval="daily"  # Coinalyze only supports daily
             )
-            oi_recent = self.binance._download_oi_history(symbol, cutoff_ms, end_ms)
+            # Only fetch recent from Binance if end_time > binance_cutoff
+            if has_recent_period:
+                oi_recent = self.binance._download_oi_history(symbol, cutoff_ms, end_ms)
+            else:
+                oi_recent = []
             data.oi_history = self._merge_history(oi_historical, oi_recent, "timestamp")
 
-            # 4. L/S Ratio - merge Coinalyze (old) + Binance (recent)
+            # 4. L/S Ratio - merge Coinalyze (old) + Binance (recent) if applicable
             ls_historical = self.coinalyze.download_ls_ratio_history(
                 symbol=symbol,
                 start_time=start_time,
-                end_time=binance_cutoff,
-                interval="daily"
+                end_time=historical_end,
+                interval="daily"  # Coinalyze only supports daily
             )
-            ls_recent = self.binance._download_ls_ratio(symbol, cutoff_ms, end_ms)
+            if has_recent_period:
+                ls_recent = self.binance._download_ls_ratio(symbol, cutoff_ms, end_ms)
+            else:
+                ls_recent = []
             data.ls_ratio_history = self._merge_history(ls_historical, ls_recent, "timestamp")
 
             # 5. Orderbook

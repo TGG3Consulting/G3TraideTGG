@@ -1,0 +1,20 @@
+# Trade Bot Dependencies
+# =====================
+
+# API Server
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic>=2.0.0
+
+# HTTP Client (для адаптеров)
+httpx>=0.24.0
+aiohttp>=3.8.0
+
+# WebSocket (для стриминга)
+websockets>=11.0
+
+# Binance SDK (для адаптера)
+python-binance>=1.0.17
+
+# Utils
+python-dotenv>=1.0.0
