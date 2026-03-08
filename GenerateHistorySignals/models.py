@@ -52,6 +52,7 @@ class BacktestResult:
     long_pnl: float
     short_pnl: float
     trades: List[Trade] = field(default_factory=list)
+    trailing_stops: int = 0  # Trailing stop exits (counted as WIN)
     # Enhanced backtesting fields
     skipped_liquidity: int = 0
     skipped_position: int = 0
@@ -75,3 +76,7 @@ class BacktestResult:
     monthly_max_dd: float = 20.0
     days_stopped: int = 0  # Number of days trading was stopped due to daily limit
     monthly_stopped: bool = False  # Whether trading was stopped due to monthly limit
+    # Trailing stop settings
+    trailing_stop_enabled: bool = False
+    trailing_stop_callback_rate: float = 0.0
+    trailing_stop_activation_pct: float = 0.0

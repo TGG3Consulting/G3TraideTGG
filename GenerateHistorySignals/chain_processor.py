@@ -61,7 +61,10 @@ def process_chains(
                     chain_seq += 1
 
             # Fill fields
-            signal.signal_id = f"{signal.date.strftime('%Y%m%d')}_{signal.symbol}_{signal.direction}"
+            # ВАЖНО: Включаем strategy в signal_id для корректной дедупликации
+            # Разные стратегии могут генерировать сигнал на один символ в один день
+            strategy_name = signal.metadata.get('strategy', 'unknown')
+            signal.signal_id = f"{signal.date.strftime('%Y%m%d')}_{signal.symbol}_{signal.direction}_{strategy_name}"
             signal.chain_id = f"{signal.symbol}_{signal.direction}_C{chain_num:03d}"
             signal.chain_seq = chain_seq
             signal.chain_gap_days = gap_days

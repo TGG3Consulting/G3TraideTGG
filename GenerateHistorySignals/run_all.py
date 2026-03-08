@@ -35,8 +35,49 @@ from strategies import StrategyConfig, list_strategies
 from strategy_runner import StrategyRunner
 
 
+import os
+import json
+
 # All available strategies
 ALL_STRATEGIES = ['ls_fade', 'momentum', 'reversal', 'mean_reversion', 'momentum_ls']
+
+
+def load_trailing_stop_config() -> Dict[str, Any]:
+    """
+    Load trailing stop config from file.
+
+    Looks for config/trailing_stop.json
+
+    Returns:
+        Dict with trailing stop settings
+    """
+    # Try different paths
+    paths = [
+        os.path.join(os.path.dirname(__file__), '..', 'config', 'trailing_stop.json'),
+        os.path.join(os.path.dirname(__file__), 'config', 'trailing_stop.json'),
+        'config/trailing_stop.json',
+    ]
+
+    for path in paths:
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    config = json.load(f)
+                    return {
+                        'enabled': config.get('enabled', False),
+                        'callback_rate': config.get('callback_rate', 1.0),
+                        'activation_pct': config.get('activation_price_pct', 0.0) or 0.0,
+                        'use_instead_of_tp': config.get('use_instead_of_tp', True),
+                    }
+            except Exception as e:
+                print(f"[WARN] Failed to load trailing stop config: {e}")
+
+    return {
+        'enabled': False,
+        'callback_rate': 1.0,
+        'activation_pct': 0.0,
+        'use_instead_of_tp': True,
+    }
 
 
 def detect_market_regime(history: Dict[str, Any]) -> Dict[str, Any]:
@@ -132,6 +173,11 @@ def run_all_strategies(
     coin_regime_lookback: int = 14,
     vol_filter_low_enabled: bool = False,
     vol_filter_high_enabled: bool = False,
+    # Trailing stop parameters
+    trailing_stop_enabled: bool = False,
+    trailing_stop_callback_rate: float = 1.0,
+    trailing_stop_activation_pct: float = 0.0,
+    trailing_stop_use_instead_of_tp: bool = True,
 ) -> List[Dict[str, Any]]:
     """
     Run all strategies on given symbols and date range.
@@ -175,6 +221,10 @@ def run_all_strategies(
     if vol_filter_high_enabled:
         vol_filter_status.append("HIGH")
     print(f"Vol Filter:  {' + '.join(vol_filter_status) + ' (per-strategy thresholds)' if vol_filter_status else 'Disabled'}")
+    if trailing_stop_enabled:
+        print(f"Trailing:    {trailing_stop_callback_rate}% callback, {trailing_stop_activation_pct}% activation, {'replaces TP' if trailing_stop_use_instead_of_tp else 'with TP'}")
+    else:
+        print(f"Trailing:    Disabled")
     print(f"Strategies:  {len(ALL_STRATEGIES)}")
     print("=" * 80)
     print()
@@ -256,6 +306,10 @@ def run_all_strategies(
                 coin_regime_lookback=coin_regime_lookback,
                 vol_filter_low_enabled=vol_filter_low_enabled,
                 vol_filter_high_enabled=vol_filter_high_enabled,
+                trailing_stop_enabled=trailing_stop_enabled,
+                trailing_stop_callback_rate=trailing_stop_callback_rate,
+                trailing_stop_activation_pct=trailing_stop_activation_pct,
+                trailing_stop_use_instead_of_tp=trailing_stop_use_instead_of_tp,
             )
         except Exception as e:
             sys.stdout = old_stdout
@@ -302,6 +356,7 @@ def run_all_strategies(
             'wins': result.wins,
             'losses': result.losses,
             'timeouts': result.timeouts,
+            'trailing_stops': result.trailing_stops,
             'win_rate': result.win_rate,
             'total_pnl': result.total_pnl,
             'avg_pnl': result.avg_pnl,
@@ -346,7 +401,11 @@ def print_results_table(results: List[Dict[str, Any]], start: datetime, end: dat
     sorted_results = sorted(results, key=lambda x: x['total_pnl'], reverse=True)
 
     for r in sorted_results:
-        wlt = f"{r['wins']}/{r['losses']}/{r['timeouts']}"
+        ts = r.get('trailing_stops', 0)
+        if ts > 0:
+            wlt = f"{r['wins']}/{r['losses']}/{r['timeouts']}/{ts}"
+        else:
+            wlt = f"{r['wins']}/{r['losses']}/{r['timeouts']}"
         status = "PROFIT" if r['total_pnl'] > 0 else "LOSS"
 
         print(f"{r['name']:<14} {r['signals']:>6} {r['trades']:>5} {r['win_rate']:>5.1f}% {r['total_pnl']:>+7.1f}% {r['max_drawdown']:>6.1f}% {r['calmar_ratio']:>7.2f} {r['total_fees']:>5.1f}% {wlt:>10} {r['avg_hold_win']:>5.1f}d  [{status}]")
@@ -463,8 +522,26 @@ Examples:
     parser.add_argument("--coin-regime-lookback", type=int, default=14, help="Lookback days for coin regime calculation (default: 14)")
     parser.add_argument("--vol-filter-low", action="store_true", help="Enable LOW volatility filter (uses per-strategy thresholds from VOL_FILTER_THRESHOLDS)")
     parser.add_argument("--vol-filter-high", action="store_true", help="Enable HIGH volatility filter (uses per-strategy thresholds from VOL_FILTER_THRESHOLDS)")
+    # Trailing stop arguments
+    parser.add_argument("--trailing-stop", action="store_true", help="Enable trailing stop (replaces fixed TP)")
+    parser.add_argument("--trailing-callback", type=float, default=1.0, help="Trailing stop callback rate %% (default: 1.0)")
+    parser.add_argument("--trailing-activation", type=float, default=0.0, help="Trailing stop activation %% (0=immediate, default: 0)")
+    parser.add_argument("--trailing-with-tp", action="store_true", help="Use trailing stop WITH fixed TP (default: replaces TP)")
 
     args = parser.parse_args()
+
+    # Load trailing stop config from file if --trailing-stop not explicitly set
+    # but config file has enabled=true
+    ts_config = load_trailing_stop_config()
+    if not args.trailing_stop and ts_config['enabled']:
+        args.trailing_stop = True
+        # Use config values unless explicitly overridden
+        if args.trailing_callback == 1.0:  # default
+            args.trailing_callback = ts_config['callback_rate']
+        if args.trailing_activation == 0.0:  # default
+            args.trailing_activation = ts_config['activation_pct']
+        if not args.trailing_with_tp and not ts_config['use_instead_of_tp']:
+            args.trailing_with_tp = True
 
     # Parse dates
     try:
@@ -522,6 +599,10 @@ Examples:
         coin_regime_lookback=args.coin_regime_lookback,
         vol_filter_low_enabled=args.vol_filter_low,
         vol_filter_high_enabled=args.vol_filter_high,
+        trailing_stop_enabled=args.trailing_stop,
+        trailing_stop_callback_rate=args.trailing_callback,
+        trailing_stop_activation_pct=args.trailing_activation,
+        trailing_stop_use_instead_of_tp=not args.trailing_with_tp,
     )
 
     # Print results

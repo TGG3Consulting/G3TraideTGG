@@ -1,0 +1,14 @@
+{
+    "_comment": "Trailing Stop Configuration for TradeBot",
+    "_doc": {
+        "enabled": "true = use trailing stop, false = use fixed TP",
+        "callback_rate": "Процент отката от максимума/минимума (0.1 - 5.0, где 1.0 = 1%)",
+        "activation_price_pct": "Активация trailing stop при достижении X% профита (null = сразу)",
+        "use_instead_of_tp": "true = заменить TP на trailing, false = использовать оба"
+    },
+
+    "enabled": true,
+    "callback_rate": 3.0,
+    "activation_price_pct": 2.5,
+    "use_instead_of_tp": true
+}

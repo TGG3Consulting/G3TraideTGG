@@ -541,8 +541,11 @@ class StrategyRunner:
             # Generate signals
             signals = self.strategy.generate_signals(data)
 
-            # Calculate ADX for each signal
+            # Calculate ADX for each signal and add strategy name to metadata
             for signal in signals:
+                # ВАЖНО: Добавляем strategy name в metadata для трекинга в trade_app
+                signal.metadata['strategy'] = self.strategy_name
+
                 # Find candle index for signal date
                 candle_idx = None
                 for idx, candle in enumerate(candles):
@@ -664,6 +667,11 @@ class StrategyRunner:
         coin_regime_lookback: int = 14,
         vol_filter_low_enabled: bool = False,
         vol_filter_high_enabled: bool = False,
+        # Trailing stop parameters
+        trailing_stop_enabled: bool = False,
+        trailing_stop_callback_rate: float = 1.0,  # 1.0 = 1% retracement
+        trailing_stop_activation_pct: float = 0.0,  # 0 = activate immediately
+        trailing_stop_use_instead_of_tp: bool = True,  # Replace TP with trailing stop
     ) -> BacktestResult:
         """
         Backtest signals against price data.
@@ -1009,32 +1017,95 @@ class StrategyRunner:
             exit_price = signal.entry
             exit_date = signal.date
 
+            # Trailing stop state
+            trailing_active = False
+            peak_price = signal.entry  # Track best price for trailing stop
+
+            # Calculate activation price for trailing stop
+            if trailing_stop_enabled:
+                if signal.direction == "LONG":
+                    # Activate when price rises by activation_pct% above entry
+                    ts_activation_price = signal.entry * (1 + trailing_stop_activation_pct / 100)
+                else:
+                    # Activate when price falls by activation_pct% below entry
+                    ts_activation_price = signal.entry * (1 - trailing_stop_activation_pct / 100)
+                # If activation_pct is 0, activate immediately
+                if trailing_stop_activation_pct == 0:
+                    trailing_active = True
+
             for j in range(1, min(max_hold_days + 1, len(candle_dates) - start_idx)):
                 future_date = candle_dates[start_idx + j]
                 future_candle = candle_by_date[future_date]
 
                 if signal.direction == "LONG":
+                    # 1. Check SL first (always)
                     if future_candle.low <= signal.stop_loss:
                         result = "LOSS"
                         exit_price = signal.stop_loss
                         exit_date = future_candle.date
                         break
-                    if future_candle.high >= signal.take_profit:
-                        result = "WIN"
-                        exit_price = signal.take_profit
-                        exit_date = future_candle.date
-                        break
+
+                    # Update peak price (highest seen)
+                    if future_candle.high > peak_price:
+                        peak_price = future_candle.high
+
+                    # Check trailing stop activation
+                    if trailing_stop_enabled and not trailing_active:
+                        if future_candle.high >= ts_activation_price:
+                            trailing_active = True
+
+                    # 2. Check trailing stop (if active)
+                    if trailing_stop_enabled and trailing_active:
+                        trailing_stop_price = peak_price * (1 - trailing_stop_callback_rate / 100)
+                        # Trailing stop must be above entry to lock profit
+                        if trailing_stop_price > signal.entry and future_candle.low <= trailing_stop_price:
+                            result = "TRAILING_STOP"
+                            exit_price = trailing_stop_price
+                            exit_date = future_candle.date
+                            break
+
+                    # 3. Check TP (if not using trailing stop instead of TP)
+                    if not (trailing_stop_enabled and trailing_stop_use_instead_of_tp):
+                        if future_candle.high >= signal.take_profit:
+                            result = "WIN"
+                            exit_price = signal.take_profit
+                            exit_date = future_candle.date
+                            break
+
                 else:  # SHORT
+                    # 1. Check SL first (always)
                     if future_candle.high >= signal.stop_loss:
                         result = "LOSS"
                         exit_price = signal.stop_loss
                         exit_date = future_candle.date
                         break
-                    if future_candle.low <= signal.take_profit:
-                        result = "WIN"
-                        exit_price = signal.take_profit
-                        exit_date = future_candle.date
-                        break
+
+                    # Update peak price (lowest seen for SHORT)
+                    if future_candle.low < peak_price:
+                        peak_price = future_candle.low
+
+                    # Check trailing stop activation
+                    if trailing_stop_enabled and not trailing_active:
+                        if future_candle.low <= ts_activation_price:
+                            trailing_active = True
+
+                    # 2. Check trailing stop (if active)
+                    if trailing_stop_enabled and trailing_active:
+                        trailing_stop_price = peak_price * (1 + trailing_stop_callback_rate / 100)
+                        # Trailing stop must be below entry to lock profit
+                        if trailing_stop_price < signal.entry and future_candle.high >= trailing_stop_price:
+                            result = "TRAILING_STOP"
+                            exit_price = trailing_stop_price
+                            exit_date = future_candle.date
+                            break
+
+                    # 3. Check TP (if not using trailing stop instead of TP)
+                    if not (trailing_stop_enabled and trailing_stop_use_instead_of_tp):
+                        if future_candle.low <= signal.take_profit:
+                            result = "WIN"
+                            exit_price = signal.take_profit
+                            exit_date = future_candle.date
+                            break
 
                 exit_price = future_candle.close
                 exit_date = future_candle.date
@@ -1100,13 +1171,15 @@ class StrategyRunner:
             if dynamic_size_enabled:
                 if result == 'LOSS':
                     symbol_size_state[signal.symbol] = 'PROTECTED'
-                elif result == 'WIN':
+                elif result in ('WIN', 'TRAILING_STOP'):
                     symbol_size_state[signal.symbol] = 'NORMAL'
                 # TIMEOUT keeps current state
 
             # Update DYN zone tracker (result + date for gap detection)
-            if current_zone == 'DYN' and result in ('WIN', 'LOSS'):
-                dyn_zone_tracker[(signal.symbol, self.strategy_name)] = (result, signal.date)
+            # TRAILING_STOP treated as WIN for DYN zone
+            tracker_result = 'WIN' if result == 'TRAILING_STOP' else result
+            if current_zone == 'DYN' and tracker_result in ('WIN', 'LOSS'):
+                dyn_zone_tracker[(signal.symbol, self.strategy_name)] = (tracker_result, signal.date)
 
             # Update risk management counters (by entry date)
             current_day_pnl += net_pnl_pct
@@ -1126,6 +1199,7 @@ class StrategyRunner:
                 wins=0,
                 losses=0,
                 timeouts=0,
+                trailing_stops=0,
                 win_rate=0.0,
                 total_pnl=0.0,
                 avg_pnl=0.0,
@@ -1147,11 +1221,15 @@ class StrategyRunner:
                 monthly_max_dd=monthly_max_dd,
                 days_stopped=days_stopped,
                 monthly_stopped=monthly_stopped,
+                trailing_stop_enabled=trailing_stop_enabled,
+                trailing_stop_callback_rate=trailing_stop_callback_rate,
+                trailing_stop_activation_pct=trailing_stop_activation_pct,
             )
 
         wins = sum(1 for t in traded if t.result == "WIN")
         losses = sum(1 for t in traded if t.result == "LOSS")
         timeouts = sum(1 for t in traded if t.result == "TIMEOUT")
+        trailing_stops = sum(1 for t in traded if t.result == "TRAILING_STOP")
 
         # Use NET PnL for all calculations (only traded)
         # When dynamic_size_enabled, weight PnL by order_size relative to normal_size
@@ -1170,17 +1248,19 @@ class StrategyRunner:
             short_pnl = sum(t.net_pnl_pct for t in short_trades) if short_trades else 0
 
         avg_pnl = total_pnl / len(traded)
-        win_rate = wins / len(traded) * 100
+        # Win rate includes both WIN and TRAILING_STOP as successful exits
+        win_rate = (wins + trailing_stops) / len(traded) * 100
 
         # Total fees (only traded)
         total_fees = sum(t.fee_pct for t in traded)
 
         # MAX DRAWDOWN calculation (only traded)
+        # Sort by EXIT date (as in live trading - PnL realized on close)
         # When dynamic_size_enabled, weight by order_size
         equity = 0.0
         peak = 0.0
         max_dd = 0.0
-        for t in sorted(traded, key=lambda x: x.signal.date):
+        for t in sorted(traded, key=lambda x: x.exit_date):
             if dynamic_size_enabled:
                 equity += t.net_pnl_pct * t.order_size / normal_size
             else:
@@ -1195,7 +1275,8 @@ class StrategyRunner:
         calmar = total_pnl / max_dd if max_dd > 0 else 0.0
 
         # Hold time stats (only traded)
-        win_trades = [t for t in traded if t.result == "WIN"]
+        # TRAILING_STOP is counted with WIN for hold time
+        win_trades = [t for t in traded if t.result in ("WIN", "TRAILING_STOP")]
         loss_trades = [t for t in traded if t.result == "LOSS"]
         timeout_trades = [t for t in traded if t.result == "TIMEOUT"]
 
@@ -1209,6 +1290,7 @@ class StrategyRunner:
             wins=wins,
             losses=losses,
             timeouts=timeouts,
+            trailing_stops=trailing_stops,
             win_rate=win_rate,
             total_pnl=total_pnl,
             avg_pnl=avg_pnl,
@@ -1236,6 +1318,9 @@ class StrategyRunner:
             monthly_max_dd=monthly_max_dd,
             days_stopped=days_stopped,
             monthly_stopped=monthly_stopped,
+            trailing_stop_enabled=trailing_stop_enabled,
+            trailing_stop_callback_rate=trailing_stop_callback_rate,
+            trailing_stop_activation_pct=trailing_stop_activation_pct,
         )
 
     def write_signals_json(
@@ -1310,7 +1395,10 @@ class StrategyRunner:
         if result.skipped_position > 0:
             print(f"  Skipped (pos):  {result.skipped_position} ({result.position_mode} mode)", flush=True)
         print(f"  Win Rate:       {result.win_rate:.1f}%", flush=True)
-        print(f"  W/L/T:          {result.wins}/{result.losses}/{result.timeouts}", flush=True)
+        if result.trailing_stops > 0:
+            print(f"  W/L/T/TS:       {result.wins}/{result.losses}/{result.timeouts}/{result.trailing_stops}", flush=True)
+        else:
+            print(f"  W/L/T:          {result.wins}/{result.losses}/{result.timeouts}", flush=True)
         print(f"  Total PnL:      {result.total_pnl:+.1f}% (net)", flush=True)
         print(f"  Avg PnL:        {result.avg_pnl:+.2f}%", flush=True)
         print(f"  LONG PnL:       {result.long_pnl:+.1f}%", flush=True)
@@ -1320,6 +1408,8 @@ class StrategyRunner:
         if result.max_drawdown > 0:
             print(f"  Calmar Ratio:   {result.calmar_ratio:.2f}", flush=True)
         print(f"  Avg Hold (W/L/T): {result.avg_hold_win:.1f}/{result.avg_hold_loss:.1f}/{result.avg_hold_timeout:.1f} days", flush=True)
+        if result.trailing_stop_enabled:
+            print(f"  Trailing Stop:  {result.trailing_stop_callback_rate}% callback, {result.trailing_stop_activation_pct}% activation", flush=True)
         print(f"{'='*60}\n", flush=True)
 
     def export_to_xlsx(
