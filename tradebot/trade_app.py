@@ -1708,8 +1708,8 @@ def main():
                         help="Monthly max drawdown %% - stop all trading if hit (default: 20)")
 
     # Logging
-    parser.add_argument("--log-file", type=str, default=None,
-                        help="Path to log file (default: None = console only). Example: logs/tradebot.log")
+    parser.add_argument("--log-file", type=str, default="logs/tradebot.log",
+                        help="Path to log file (default: logs/tradebot.log)")
     parser.add_argument("--log-level", type=str, default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="Log level (default: INFO)")
