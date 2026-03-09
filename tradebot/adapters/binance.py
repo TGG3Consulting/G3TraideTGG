@@ -832,6 +832,13 @@ class BinanceFuturesAdapter(ExchangeInterface):
         # Округляем вниз до step_size
         return (quantity // step_size) * step_size
 
+    def get_step_size(self, symbol: str) -> Decimal:
+        """Получить step_size для символа."""
+        info = self._symbol_info.get(symbol)
+        if not info:
+            return Decimal("0.001")  # Default fallback
+        return info["step_size"]
+
     def round_price(self, symbol: str, price: Decimal) -> Decimal:
         """Округлить цену по правилам биржи."""
         info = self._symbol_info.get(symbol)

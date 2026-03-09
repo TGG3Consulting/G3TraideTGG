@@ -286,6 +286,11 @@ class ExchangeInterface(ABC):
         pass
 
     @abstractmethod
+    def get_step_size(self, symbol: str) -> Decimal:
+        """Получить step_size для символа."""
+        pass
+
+    @abstractmethod
     def round_price(self, symbol: str, price: Decimal) -> Decimal:
         """Округлить цену по правилам биржи."""
         pass

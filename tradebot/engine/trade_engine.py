@@ -185,6 +185,18 @@ class TradeEngine:
             # 2. Рассчитываем quantity
             quantity = Decimal(str(size_usd)) / current_price
             quantity = self.exchange.round_quantity(signal.symbol, quantity)
+
+            # 2.1. Проверяем notional >= 100 USDT (минимум Binance Futures)
+            # После округления ВНИЗ notional может стать < 100
+            notional = quantity * current_price
+            min_notional = Decimal("100")
+            if notional < min_notional:
+                # Добавляем step_size пока notional < 100
+                step_size = self.exchange.get_step_size(signal.symbol)
+                while quantity * current_price < min_notional:
+                    quantity += step_size
+                logger.info(f"Quantity adjusted for min notional: {quantity} (notional={quantity * current_price:.2f})")
+
             logger.info(f"Quantity: {quantity}")
 
             # 3. Устанавливаем leverage
