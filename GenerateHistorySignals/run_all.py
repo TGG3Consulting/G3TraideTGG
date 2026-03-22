@@ -38,6 +38,17 @@ from strategy_runner import StrategyRunner
 import os
 import json
 
+# Add tradebot path for RegimeFilter import
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'tradebot'))
+
+# Import RegimeFilter for market regime detection
+try:
+    from engine.regime_filter import RegimeFilter
+    REGIME_FILTER_AVAILABLE = True
+except ImportError:
+    REGIME_FILTER_AVAILABLE = False
+    RegimeFilter = None
+
 # All available strategies
 ALL_STRATEGIES = ['ls_fade', 'momentum', 'reversal', 'mean_reversion', 'momentum_ls']
 
@@ -178,6 +189,8 @@ def run_all_strategies(
     trailing_stop_callback_rate: float = 1.0,
     trailing_stop_activation_pct: float = 0.0,
     trailing_stop_use_instead_of_tp: bool = True,
+    # Regime filter parameter
+    regime_filter_enabled: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Run all strategies on given symbols and date range.
@@ -225,6 +238,7 @@ def run_all_strategies(
         print(f"Trailing:    {trailing_stop_callback_rate}% callback, {trailing_stop_activation_pct}% activation, {'replaces TP' if trailing_stop_use_instead_of_tp else 'with TP'}")
     else:
         print(f"Trailing:    Disabled")
+    print(f"Regime Flt:  {'ENABLED (BTC/ALT dynamic switching)' if regime_filter_enabled else 'Disabled'}")
     print(f"Strategies:  {len(ALL_STRATEGIES)}")
     print("=" * 80)
     print()
@@ -232,13 +246,27 @@ def run_all_strategies(
     print("[1/3] Downloading historical data...")
     print()
 
+    # If regime filter enabled, ensure BTCDOMUSDT is in the download list
+    download_symbols = list(symbols)
+    if regime_filter_enabled and 'BTCDOMUSDT' not in download_symbols:
+        download_symbols.append('BTCDOMUSDT')
+        print(f"  [REGIME] Added BTCDOMUSDT for regime filter calculation")
+
     downloader = HybridHistoryDownloader(
         cache_dir='cache',
         coinalyze_api_key='adb282f9-7e9e-4b6c-a669-b01c0304d506',
         data_interval=data_interval
     )
 
-    history = downloader.download_with_coinalyze_backfill(symbols, start, end)
+    history = downloader.download_with_coinalyze_backfill(download_symbols, start, end)
+
+    # Initialize regime filter if enabled
+    regime_filter = None
+    if regime_filter_enabled and REGIME_FILTER_AVAILABLE:
+        regime_filter = RegimeFilter(enabled=True)
+        print(f"  [REGIME] Filter initialized")
+    elif regime_filter_enabled and not REGIME_FILTER_AVAILABLE:
+        print(f"  [WARN] Regime filter requested but RegimeFilter module not available")
 
     # Detect market regime
     market_regime = detect_market_regime(history)
@@ -287,6 +315,23 @@ def run_all_strategies(
 
         try:
             signals = runner.generate_signals(history, symbols, dedup_days=dedup_days)
+
+            # REGIME FILTER: filter signals by market regime on each signal date
+            regime_filtered_count = 0
+            if regime_filter is not None and signals:
+                filtered_signals = []
+                for signal in signals:
+                    # Calculate regime for signal date
+                    filtered_syms, regime_result = regime_filter.filter_symbols_backtest(
+                        symbols, history, signal.date
+                    )
+                    # Check if signal's symbol passes the filter
+                    if signal.symbol in filtered_syms:
+                        filtered_signals.append(signal)
+                    else:
+                        regime_filtered_count += 1
+                signals = filtered_signals
+
             result = runner.backtest_signals(
                 signals, history,
                 max_hold_days=max_hold_days,
@@ -352,6 +397,7 @@ def run_all_strategies(
             'skipped_month_filter': result.skipped_month_filter,
             'skipped_day_filter': result.skipped_day_filter,
             'skipped_regime': result.skipped_regime,
+            'skipped_regime_filter': regime_filtered_count,  # NEW: market regime filter
             'regime_dynamic': result.regime_dynamic_count,
             'wins': result.wins,
             'losses': result.losses,
@@ -421,6 +467,7 @@ def print_results_table(results: List[Dict[str, Any]], start: datetime, end: dat
     total_skipped_month_filter = sum(r.get('skipped_month_filter', 0) for r in results)
     total_skipped_day_filter = sum(r.get('skipped_day_filter', 0) for r in results)
     total_skipped_regime = sum(r.get('skipped_regime', 0) for r in results)
+    total_skipped_regime_filter = sum(r.get('skipped_regime_filter', 0) for r in results)  # NEW: market regime
     total_regime_dynamic = sum(r.get('regime_dynamic', 0) for r in results)
     total_days_stopped = sum(r.get('days_stopped', 0) for r in results)
     any_monthly_stopped = any(r.get('monthly_stopped', False) for r in results)
@@ -431,7 +478,8 @@ def print_results_table(results: List[Dict[str, Any]], start: datetime, end: dat
 
     has_skips = (total_skipped_liq > 0 or total_skipped_pos > 0 or total_skipped_daily > 0 or
                  total_skipped_monthly > 0 or total_skipped_month_filter > 0 or
-                 total_skipped_day_filter > 0 or total_skipped_regime > 0 or total_ml_filtered > 0)
+                 total_skipped_day_filter > 0 or total_skipped_regime > 0 or
+                 total_skipped_regime_filter > 0 or total_ml_filtered > 0)
     if has_skips:
         print("Skip Summary:")
         if total_ml_filtered > 0:
@@ -442,6 +490,8 @@ def print_results_table(results: List[Dict[str, Any]], start: datetime, end: dat
             print(f"  - Day filter: {total_skipped_day_filter}")
         if total_skipped_regime > 0:
             print(f"  - Coin regime OFF: {total_skipped_regime}")
+        if total_skipped_regime_filter > 0:
+            print(f"  - Market regime filter: {total_skipped_regime_filter} (BTC/ALT mode)")
         if total_regime_dynamic > 0:
             print(f"  - Coin regime DYN: {total_regime_dynamic} (reduced size)")
         if total_skipped_liq > 0:
@@ -527,6 +577,9 @@ Examples:
     parser.add_argument("--trailing-callback", type=float, default=1.0, help="Trailing stop callback rate %% (default: 1.0)")
     parser.add_argument("--trailing-activation", type=float, default=0.0, help="Trailing stop activation %% (0=immediate, default: 0)")
     parser.add_argument("--trailing-with-tp", action="store_true", help="Use trailing stop WITH fixed TP (default: replaces TP)")
+    # Regime filter arguments
+    parser.add_argument("--regime-filter", action="store_true",
+                        help="Enable regime filter (BTC_ONLY/ALT_ONLY/MIXED based on correlation and BTC dominance)")
 
     args = parser.parse_args()
 
@@ -603,6 +656,7 @@ Examples:
         trailing_stop_callback_rate=args.trailing_callback,
         trailing_stop_activation_pct=args.trailing_activation,
         trailing_stop_use_instead_of_tp=not args.trailing_with_tp,
+        regime_filter_enabled=args.regime_filter,
     )
 
     # Print results

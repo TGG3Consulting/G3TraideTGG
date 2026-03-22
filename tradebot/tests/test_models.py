@@ -10,7 +10,7 @@ Testing:
 """
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from tradebot.core.models import (
     Position,
     PositionSide,
@@ -142,7 +142,7 @@ class TestPositionExpiry:
 
     def test_get_hold_days_returns_correct_value(self):
         """get_hold_days should return correct number of days."""
-        opened_at = datetime.utcnow() - timedelta(days=5, hours=12)
+        opened_at = datetime.now(timezone.utc) - timedelta(days=5, hours=12)
         position = Position(
             position_id="TEST",
             signal_id="SIG",
@@ -174,7 +174,7 @@ class TestPositionExpiry:
 
     def test_exactly_max_hold_days_is_expired(self):
         """Position exactly at max_hold_days should be expired."""
-        opened_at = datetime.utcnow() - timedelta(days=14)
+        opened_at = datetime.now(timezone.utc) - timedelta(days=14)
         position = Position(
             position_id="TEST",
             signal_id="SIG",
@@ -192,7 +192,7 @@ class TestPositionExpiry:
 
     def test_one_second_before_max_hold_not_expired(self):
         """Position one second before max_hold_days should NOT be expired."""
-        opened_at = datetime.utcnow() - timedelta(days=14) + timedelta(seconds=1)
+        opened_at = datetime.now(timezone.utc) - timedelta(days=14) + timedelta(seconds=1)
         position = Position(
             position_id="TEST",
             signal_id="SIG",
@@ -214,7 +214,7 @@ class TestPositionCreation:
 
     def test_created_at_auto_set(self):
         """created_at should be auto-set if not provided."""
-        before = datetime.utcnow()
+        before = datetime.now(timezone.utc)
         position = Position(
             position_id="TEST",
             signal_id="SIG",
@@ -225,7 +225,7 @@ class TestPositionCreation:
             stop_loss=48000.0,
             take_profit=55000.0,
         )
-        after = datetime.utcnow()
+        after = datetime.now(timezone.utc)
 
         assert position.created_at is not None
         assert before <= position.created_at <= after
@@ -264,7 +264,7 @@ class TestTradeOrderCreation:
 
     def test_created_at_auto_set(self):
         """created_at should be auto-set if not provided."""
-        before = datetime.utcnow()
+        before = datetime.now(timezone.utc)
         order = TradeOrder(
             order_id="TEST",
             signal_id="SIG",
@@ -273,7 +273,7 @@ class TestTradeOrderCreation:
             order_type=OrderType.MARKET,
             quantity=0.001,
         )
-        after = datetime.utcnow()
+        after = datetime.now(timezone.utc)
 
         assert order.created_at is not None
         assert before <= order.created_at <= after

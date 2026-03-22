@@ -7,8 +7,9 @@ Trade Bot Core Models - Модели данных ядра.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from enum import Enum
+from threading import Lock
 from typing import Optional, Dict, Any
 
 
@@ -101,7 +102,7 @@ class TradeOrder:
 
     def __post_init__(self):
         if self.created_at is None:
-            self.created_at = datetime.utcnow()
+            self.created_at = datetime.now(timezone.utc)
 
 
 # =============================================================================
@@ -135,6 +136,10 @@ class Position:
     requested_quantity: float = 0.0  # Запрошенное количество (для partial fill tracking)
     is_partial_fill: bool = False    # True если entry был partial fill
 
+    # FIX #7: Exit order partial fill tracking
+    # Если TP/SL частично исполнился а потом отменён - нужно знать сколько уже закрыто
+    exit_filled_qty: float = 0.0     # Сколько уже исполнено по exit orders (SL/TP/Trailing)
+
     # === СТАТУС ===
     status: PositionStatus = PositionStatus.PENDING
 
@@ -167,13 +172,51 @@ class Position:
     regime_action: str = "FULL"  # FULL/DYN/OFF - влияет на размер
     max_hold_days: int = 14      # Автозакрытие по таймауту
 
+    # Thread-safe lock (не включается в dataclass fields)
+    _lock: Lock = field(default_factory=Lock, repr=False, compare=False)
+
     def __post_init__(self):
         if self.created_at is None:
-            self.created_at = datetime.utcnow()
+            self.created_at = datetime.now(timezone.utc)
+        # Lock уже создан через field default_factory
+
+    def close_safe(
+        self,
+        exit_reason: str,
+        exit_price: float = 0.0,
+        realized_pnl: float = 0.0,
+    ) -> bool:
+        """
+        Thread-safe закрытие позиции.
+
+        Гарантирует что status изменится только один раз,
+        даже при concurrent вызовах из разных источников
+        (WebSocket, REST sync, manual close).
+
+        Returns:
+            True если позиция была закрыта этим вызовом
+            False если уже была закрыта ранее
+        """
+        with self._lock:
+            if self.status == PositionStatus.CLOSED:
+                return False  # Уже закрыта
+
+            self.status = PositionStatus.CLOSED
+            self.exit_reason = exit_reason
+            self.exit_price = exit_price
+            self.realized_pnl = realized_pnl
+            self.closed_at = datetime.now(timezone.utc)
+            return True
 
     @property
     def is_open(self) -> bool:
+        """True если позиция OPEN (на бирже)."""
         return self.status == PositionStatus.OPEN
+
+    @property
+    def is_active(self) -> bool:
+        """True если позиция не закрыта (PENDING или OPEN)."""
+        return self.status in (PositionStatus.PENDING, PositionStatus.OPEN)
 
     @property
     def is_long(self) -> bool:
@@ -192,13 +235,16 @@ class Position:
         """Проверить истёк ли max_hold_days."""
         if not self.opened_at or not self.is_open:
             return False
-        from datetime import timedelta
-        hold_duration = datetime.utcnow() - self.opened_at
+        hold_duration = datetime.now(timezone.utc) - self.opened_at
         return hold_duration >= timedelta(days=self.max_hold_days)
 
     def get_hold_days(self) -> float:
         """Получить количество дней удержания позиции."""
         if not self.opened_at:
             return 0.0
-        hold_duration = datetime.utcnow() - self.opened_at
+        # FIX #13: Для закрытой позиции считаем до closed_at, не до now
+        if self.closed_at:
+            hold_duration = self.closed_at - self.opened_at
+        else:
+            hold_duration = datetime.now(timezone.utc) - self.opened_at
         return hold_duration.total_seconds() / (24 * 3600)

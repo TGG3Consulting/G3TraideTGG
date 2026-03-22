@@ -14,7 +14,7 @@ Testing:
 
 import pytest
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Dict, Any
@@ -69,7 +69,7 @@ def open_long_position():
         entry_order_id="ENTRY_001",
         sl_order_id="SL_001",
         tp_order_id="TP_001",
-        opened_at=datetime.utcnow(),
+        opened_at=datetime.now(timezone.utc),
     )
 
 
@@ -122,22 +122,21 @@ class TestOrderTradeUpdateHandling:
         mock_trade_engine.positions[open_long_position.position_id] = open_long_position
         position_manager.register_position(open_long_position)
 
-        # Simulate SL fill event
-        event = {
-            "e": "ORDER_TRADE_UPDATE",
-            "T": 1234567890123,
-            "o": {
-                "s": "BTCUSDT",
-                "i": "SL_001",  # SL order ID
-                "X": "FILLED",
-                "o": "STOP_MARKET",
-                "ap": "48000.00",
-                "rp": "-2.00",  # Realized PnL
-                "z": "0.001",
-            }
+        # Simulate SL fill event (flat format as provided by binance.py)
+        # SL uses ALGO_UPDATE event type
+        order_info = {
+            "orderId": "SL_001",
+            "symbol": "BTCUSDT",
+            "status": "FILLED",
+            "type": "STOP_MARKET",
+            "avgPrice": "48000.00",
+            "executedQty": "0.001",
+            "origQty": "0.001",
+            "realizedPnl": "-2.00",
+            "eventType": "ALGO_UPDATE",
         }
 
-        position_manager._handle_order_update(event)
+        position_manager._handle_order_update(order_info)
 
         assert open_long_position.status == PositionStatus.CLOSED
         assert open_long_position.exit_reason == "SL"
@@ -150,21 +149,20 @@ class TestOrderTradeUpdateHandling:
         mock_trade_engine.positions[open_long_position.position_id] = open_long_position
         position_manager.register_position(open_long_position)
 
-        event = {
-            "e": "ORDER_TRADE_UPDATE",
-            "T": 1234567890123,
-            "o": {
-                "s": "BTCUSDT",
-                "i": "TP_001",  # TP order ID
-                "X": "FILLED",
-                "o": "TAKE_PROFIT_MARKET",
-                "ap": "55000.00",
-                "rp": "5.00",
-                "z": "0.001",
-            }
+        # TP uses ORDER_TRADE_UPDATE (LIMIT order)
+        order_info = {
+            "orderId": "TP_001",
+            "symbol": "BTCUSDT",
+            "status": "FILLED",
+            "type": "LIMIT",
+            "avgPrice": "55000.00",
+            "executedQty": "0.001",
+            "origQty": "0.001",
+            "realizedPnl": "5.00",
+            "eventType": "ORDER_TRADE_UPDATE",
         }
 
-        position_manager._handle_order_update(event)
+        position_manager._handle_order_update(order_info)
 
         assert open_long_position.status == PositionStatus.CLOSED
         assert open_long_position.exit_reason == "TP"
@@ -177,36 +175,30 @@ class TestOrderTradeUpdateHandling:
         mock_trade_engine.positions[open_long_position.position_id] = open_long_position
         position_manager.register_position(open_long_position)
 
-        event = {
-            "e": "ORDER_TRADE_UPDATE",
-            "T": 1234567890123,
-            "o": {
-                "s": "BTCUSDT",
-                "i": "SL_001",
-                "X": "PARTIALLY_FILLED",  # Not fully filled
-                "o": "STOP_MARKET",
-                "ap": "48000.00",
-                "z": "0.0005",
-                "q": "0.001",
-                "L": "48000.00",
-            }
+        order_info = {
+            "orderId": "SL_001",
+            "symbol": "BTCUSDT",
+            "status": "PARTIALLY_FILLED",
+            "type": "STOP_MARKET",
+            "avgPrice": "48000.00",
+            "executedQty": "0.0005",
+            "origQty": "0.001",
+            "eventType": "ALGO_UPDATE",
         }
 
-        position_manager._handle_order_update(event)
+        position_manager._handle_order_update(order_info)
 
         assert open_long_position.status == PositionStatus.OPEN  # Still open!
 
     def test_untracked_order_ignored(self, position_manager, mock_trade_engine):
         """Orders not in our mapping should be ignored."""
-        event = {
-            "e": "ORDER_TRADE_UPDATE",
-            "o": {
-                "i": "UNKNOWN_ORDER",
-                "X": "FILLED",
-            }
+        order_info = {
+            "orderId": "UNKNOWN_ORDER",
+            "status": "FILLED",
+            "eventType": "ORDER_TRADE_UPDATE",
         }
 
-        position_manager._handle_order_update(event)
+        position_manager._handle_order_update(order_info)
 
         assert position_manager._stats["positions_closed_sl"] == 0
         assert position_manager._stats["positions_closed_tp"] == 0
@@ -217,18 +209,16 @@ class TestOrderTradeUpdateHandling:
         mock_trade_engine.positions[open_long_position.position_id] = open_long_position
         position_manager.register_position(open_long_position)
 
-        event = {
-            "e": "ORDER_TRADE_UPDATE",
-            "o": {
-                "i": "SL_001",
-                "X": "FILLED",
-                "ap": "48000.00",
-                "rp": "-2.00",
-            }
+        order_info = {
+            "orderId": "SL_001",
+            "status": "FILLED",
+            "avgPrice": "48000.00",
+            "realizedPnl": "-2.00",
+            "eventType": "ALGO_UPDATE",
         }
 
         # Should not error, should just skip
-        position_manager._handle_order_update(event)
+        position_manager._handle_order_update(order_info)
 
         # No additional closes counted
         assert position_manager._stats["positions_closed_sl"] == 0
@@ -241,17 +231,19 @@ class TestOrderTradeUpdateHandling:
         callback_data = []
         position_manager.on_position_closed = lambda pos, reason, pnl: callback_data.append((pos, reason, pnl))
 
-        event = {
-            "e": "ORDER_TRADE_UPDATE",
-            "o": {
-                "i": "SL_001",
-                "X": "FILLED",
-                "ap": "48000.00",
-                "rp": "-2.00",
-            }
+        # SL uses ALGO_UPDATE
+        order_info = {
+            "orderId": "SL_001",
+            "symbol": "BTCUSDT",
+            "status": "FILLED",
+            "type": "STOP_MARKET",
+            "avgPrice": "48000.00",
+            "executedQty": "0.001",
+            "realizedPnl": "-2.00",
+            "eventType": "ALGO_UPDATE",
         }
 
-        position_manager._handle_order_update(event)
+        position_manager._handle_order_update(order_info)
 
         assert len(callback_data) == 1
         assert callback_data[0][0] is open_long_position
@@ -325,7 +317,7 @@ class TestTimeoutCheck:
             stop_loss=48000.0,
             take_profit=55000.0,
             status=PositionStatus.OPEN,
-            opened_at=datetime.utcnow() - timedelta(days=15),  # 15 days ago
+            opened_at=datetime.now(timezone.utc) - timedelta(days=15),  # 15 days ago
             max_hold_days=14,
         )
 
@@ -355,15 +347,17 @@ class TestTimeoutCheck:
     async def test_timeout_close_cancels_orders(
         self, position_manager, mock_trade_engine, mock_exchange, expired_position
     ):
-        """Timeout close should cancel SL and TP orders."""
-        expired_position.sl_order_id = "SL_EXP"
+        """Timeout close should cancel SL (algo) and TP orders."""
+        # SL uses Algo Order API - algoId must be numeric
+        expired_position.sl_order_id = "987654321"
         expired_position.tp_order_id = "TP_EXP"
         mock_trade_engine.positions[expired_position.position_id] = expired_position
 
         await position_manager._close_position_timeout(expired_position)
 
-        # Should have called cancel_order for SL and TP
-        assert mock_exchange.cancel_order.call_count >= 2
+        # SL uses cancel_algo_order, TP uses cancel_order
+        assert mock_exchange.cancel_algo_order.call_count >= 1  # SL Algo
+        assert mock_exchange.cancel_order.call_count >= 1  # TP regular
 
 
 # =============================================================================
@@ -457,8 +451,9 @@ class TestRESTSync:
         position_manager.register_position(open_long_position)
 
         # Exchange returns position but NO orders (SL was filled)
+        # FIX #3: Include positionSide for Hedge Mode support
         mock_exchange.get_all_positions = AsyncMock(return_value=[
-            {"symbol": "BTCUSDT", "positionAmt": "0.001"}  # Position exists
+            {"symbol": "BTCUSDT", "positionAmt": "0.001", "positionSide": "LONG"}  # Position exists
         ])
         mock_exchange.get_open_orders = AsyncMock(return_value=[])  # No orders!
         mock_exchange.get_price = AsyncMock(return_value=Decimal("48000"))
@@ -477,8 +472,9 @@ class TestRESTSync:
         position_manager.register_position(open_long_position)
 
         # Exchange returns matching state
+        # FIX #3: Include positionSide for Hedge Mode support
         mock_exchange.get_all_positions = AsyncMock(return_value=[
-            {"symbol": "BTCUSDT", "positionAmt": "0.001"}
+            {"symbol": "BTCUSDT", "positionAmt": "0.001", "positionSide": "LONG"}
         ])
         mock_exchange.get_open_orders = AsyncMock(return_value=[
             {"orderId": "SL_001"},
@@ -563,6 +559,7 @@ class TestGetStats:
             "rest_sync_runs",
             "rest_sync_positions_fixed",
             "rest_sync_orders_fixed",
+            "orphans_cleaned",
             "tracked_orders",
             "open_positions",
         ]
@@ -590,18 +587,549 @@ class TestCallbackErrorHandling:
 
         position_manager.on_position_closed = bad_callback
 
-        event = {
-            "e": "ORDER_TRADE_UPDATE",
-            "o": {
-                "i": "SL_001",
-                "X": "FILLED",
-                "ap": "48000.00",
-                "rp": "-2.00",
-            }
+        # Use flat format (as provided by binance.py)
+        order_info = {
+            "orderId": "SL_001",
+            "symbol": "BTCUSDT",
+            "status": "FILLED",
+            "type": "STOP_MARKET",
+            "avgPrice": "48000.00",
+            "executedQty": "0.001",
+            "realizedPnl": "-2.00",
+            "eventType": "ALGO_UPDATE",
         }
 
         # Should not raise
-        position_manager._handle_order_update(event)
+        position_manager._handle_order_update(order_info)
 
         # Position should still be closed
         assert open_long_position.status == PositionStatus.CLOSED
+
+
+# =============================================================================
+# TEST ORPHAN ORDER CLEANUP (TradeAI1 style)
+# =============================================================================
+
+class TestOrphanOrderCleanup:
+    """Test orphan order cleanup functionality."""
+
+    @pytest.mark.asyncio
+    async def test_orphan_order_cancelled(self, position_manager, mock_exchange):
+        """Orphan order (no position) should be cancelled."""
+        # Setup: order exists but no position
+        mock_exchange.get_all_positions = AsyncMock(return_value=[])
+        mock_exchange.get_open_orders = AsyncMock(return_value=[
+            {
+                "orderId": "123456",
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "positionSide": "LONG",
+                "type": "TAKE_PROFIT_MARKET",
+            }
+        ])
+        mock_exchange.get_open_algo_orders = AsyncMock(return_value=[])
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+
+        # Execute
+        await position_manager._clean_orphan_orders([], [
+            {
+                "orderId": "123456",
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "positionSide": "LONG",
+                "type": "TAKE_PROFIT_MARKET",
+            }
+        ], [])
+
+        # Verify
+        mock_exchange.cancel_order.assert_called_once_with("BTCUSDT", "123456")
+        assert position_manager._stats["orphans_cleaned"] == 1
+
+    @pytest.mark.asyncio
+    async def test_orphan_algo_order_cancelled(self, position_manager, mock_exchange):
+        """Orphan algo order (no position) should be cancelled."""
+        mock_exchange.cancel_algo_order = AsyncMock(return_value=True)
+
+        # Execute
+        await position_manager._clean_orphan_orders([], [], [
+            {
+                "algoId": 789012,
+                "symbol": "ETHUSDT",
+                "side": "BUY",
+                "positionSide": "SHORT",
+                "orderType": "STOP_MARKET",
+            }
+        ])
+
+        # Verify
+        mock_exchange.cancel_algo_order.assert_called_once_with("ETHUSDT", algo_id=789012)
+        assert position_manager._stats["orphans_cleaned"] == 1
+
+    @pytest.mark.asyncio
+    async def test_order_with_position_not_cancelled(self, position_manager, mock_exchange):
+        """Order with existing position should NOT be cancelled."""
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+
+        # Position exists
+        positions = [
+            {"symbol": "BTCUSDT", "positionSide": "LONG", "positionAmt": "0.001"}
+        ]
+        orders = [
+            {
+                "orderId": "123456",
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "positionSide": "LONG",
+                "type": "TAKE_PROFIT_MARKET",
+            }
+        ]
+
+        # Execute
+        await position_manager._clean_orphan_orders(positions, orders, [])
+
+        # Verify - should NOT be cancelled
+        mock_exchange.cancel_order.assert_not_called()
+        assert position_manager._stats["orphans_cleaned"] == 0
+
+    @pytest.mark.asyncio
+    async def test_grace_period_prevents_cancel(self, position_manager, mock_exchange):
+        """Order in grace period should NOT be cancelled."""
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+
+        # Set grace period for BTCUSDT
+        position_manager._recently_closed_symbols["BTCUSDT"] = datetime.now(timezone.utc)
+
+        # Execute - position is gone but in grace period
+        await position_manager._clean_orphan_orders([], [
+            {
+                "orderId": "123456",
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "positionSide": "LONG",
+                "type": "TAKE_PROFIT_MARKET",
+            }
+        ], [])
+
+        # Verify - should NOT be cancelled due to grace period
+        mock_exchange.cancel_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_expired_grace_period_allows_cancel(self, position_manager, mock_exchange):
+        """Order after grace period expired should be cancelled."""
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+
+        # Set EXPIRED grace period (61 seconds ago)
+        position_manager._recently_closed_symbols["BTCUSDT"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=61)
+        )
+
+        # Execute
+        await position_manager._clean_orphan_orders([], [
+            {
+                "orderId": "123456",
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "positionSide": "LONG",
+                "type": "TAKE_PROFIT_MARKET",
+            }
+        ], [])
+
+        # Verify - should be cancelled (grace expired)
+        mock_exchange.cancel_order.assert_called_once()
+        # Grace period entry should be cleaned up
+        assert "BTCUSDT" not in position_manager._recently_closed_symbols
+
+    def test_unregister_sets_grace_period(self, position_manager, open_long_position):
+        """unregister_position should set grace period."""
+        position_manager.register_position(open_long_position)
+
+        # Unregister
+        position_manager.unregister_position(open_long_position)
+
+        # Verify grace period is set
+        assert open_long_position.symbol in position_manager._recently_closed_symbols
+        grace_time = position_manager._recently_closed_symbols[open_long_position.symbol]
+        assert (datetime.now(timezone.utc) - grace_time).total_seconds() < 2
+
+
+# =============================================================================
+# EDGE CASE TESTS - Реальные сценарии которые могут сломать код
+# =============================================================================
+
+class TestOrphanCleanupEdgeCases:
+    """Edge cases that could break orphan cleanup in production."""
+
+    @pytest.mark.asyncio
+    async def test_long_short_same_symbol_only_long_exists(
+        self, position_manager, mock_exchange
+    ):
+        """
+        BUG SCENARIO: BTCUSDT has LONG position, but orphan order is for SHORT.
+        Should cancel the SHORT order, keep LONG order intact.
+        """
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+
+        # Only LONG position exists
+        positions = [
+            {"symbol": "BTCUSDT", "positionSide": "LONG", "positionAmt": "0.001"}
+        ]
+        # Two orders: one for LONG (valid), one for SHORT (orphan)
+        orders = [
+            {
+                "orderId": "111",
+                "symbol": "BTCUSDT",
+                "side": "SELL",  # Exit LONG
+                "positionSide": "LONG",
+                "type": "TAKE_PROFIT",
+            },
+            {
+                "orderId": "222",
+                "symbol": "BTCUSDT",
+                "side": "BUY",  # Exit SHORT - but no SHORT position!
+                "positionSide": "SHORT",
+                "type": "STOP_MARKET",
+            },
+        ]
+
+        await position_manager._clean_orphan_orders(positions, orders, [])
+
+        # Should cancel ONLY the SHORT order
+        mock_exchange.cancel_order.assert_called_once_with("BTCUSDT", "222")
+
+    @pytest.mark.asyncio
+    async def test_position_side_both_fallback_logic(
+        self, position_manager, mock_exchange
+    ):
+        """
+        BUG SCENARIO: Order has positionSide="BOTH" (non-hedge mode).
+        Must derive position side from order side correctly.
+        SELL order -> LONG position, BUY order -> SHORT position.
+        """
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+
+        # LONG position exists
+        positions = [
+            {"symbol": "ETHUSDT", "positionSide": "LONG", "positionAmt": "1.0"}
+        ]
+
+        # Order with positionSide="BOTH", side="SELL" -> should map to LONG
+        orders_valid = [
+            {
+                "orderId": "333",
+                "symbol": "ETHUSDT",
+                "side": "SELL",
+                "positionSide": "BOTH",  # Fallback case
+                "type": "LIMIT",
+            }
+        ]
+
+        await position_manager._clean_orphan_orders(positions, orders_valid, [])
+        # Should NOT cancel - SELL maps to LONG, LONG position exists
+        mock_exchange.cancel_order.assert_not_called()
+
+        # Now test orphan case: BUY order (maps to SHORT), but only LONG exists
+        orders_orphan = [
+            {
+                "orderId": "444",
+                "symbol": "ETHUSDT",
+                "side": "BUY",
+                "positionSide": "BOTH",  # Maps to SHORT
+                "type": "LIMIT",
+            }
+        ]
+
+        await position_manager._clean_orphan_orders(positions, orders_orphan, [])
+        # Should cancel - BUY maps to SHORT, no SHORT position
+        mock_exchange.cancel_order.assert_called_once_with("ETHUSDT", "444")
+
+    @pytest.mark.asyncio
+    async def test_cancel_failure_does_not_crash(
+        self, position_manager, mock_exchange
+    ):
+        """
+        BUG SCENARIO: cancel_order raises exception.
+        Should NOT crash, should continue processing other orders.
+        """
+        call_count = 0
+
+        async def mock_cancel(symbol, order_id):
+            nonlocal call_count
+            call_count += 1
+            if order_id == "111":
+                raise Exception("Network timeout")
+            return True
+
+        mock_exchange.cancel_order = mock_cancel
+
+        orders = [
+            {"orderId": "111", "symbol": "BTCUSDT", "side": "SELL", "positionSide": "LONG", "type": "TP"},
+            {"orderId": "222", "symbol": "ETHUSDT", "side": "SELL", "positionSide": "LONG", "type": "TP"},
+            {"orderId": "333", "symbol": "SOLUSDT", "side": "SELL", "positionSide": "LONG", "type": "TP"},
+        ]
+
+        # Should NOT raise, should continue
+        await position_manager._clean_orphan_orders([], orders, [])
+
+        # All 3 cancels should have been attempted
+        assert call_count == 3
+        # Only 2 successful (111 failed)
+        assert position_manager._stats["orphans_cleaned"] == 2
+
+    @pytest.mark.asyncio
+    async def test_algo_cancel_failure_does_not_crash(
+        self, position_manager, mock_exchange
+    ):
+        """
+        BUG SCENARIO: cancel_algo_order raises exception.
+        Should NOT crash, should continue.
+        """
+        mock_exchange.cancel_algo_order = AsyncMock(side_effect=Exception("API Error"))
+
+        algo_orders = [
+            {"algoId": 111, "symbol": "BTCUSDT", "side": "SELL", "positionSide": "LONG", "orderType": "SL"},
+        ]
+
+        # Should NOT raise
+        await position_manager._clean_orphan_orders([], [], algo_orders)
+        # Should have 0 cleaned (failed)
+        assert position_manager._stats["orphans_cleaned"] == 0
+
+    @pytest.mark.asyncio
+    async def test_missing_order_id_skipped(self, position_manager, mock_exchange):
+        """
+        BUG SCENARIO: Order has no orderId or empty orderId.
+        Should skip without crashing.
+        """
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+
+        orders = [
+            {"orderId": None, "symbol": "BTCUSDT", "side": "SELL", "positionSide": "LONG"},
+            {"orderId": "", "symbol": "ETHUSDT", "side": "SELL", "positionSide": "LONG"},
+            {"symbol": "SOLUSDT", "side": "SELL", "positionSide": "LONG"},  # No orderId key
+            {"orderId": "123", "symbol": "XRPUSDT", "side": "SELL", "positionSide": "LONG"},
+        ]
+
+        await position_manager._clean_orphan_orders([], orders, [])
+
+        # Should only cancel the valid one
+        mock_exchange.cancel_order.assert_called_once_with("XRPUSDT", "123")
+
+    @pytest.mark.asyncio
+    async def test_algo_id_none_skipped(self, position_manager, mock_exchange):
+        """
+        BUG SCENARIO: Algo order has algoId=None.
+        Should skip without crashing.
+        """
+        mock_exchange.cancel_algo_order = AsyncMock(return_value=True)
+
+        algo_orders = [
+            {"algoId": None, "symbol": "BTCUSDT", "side": "SELL", "positionSide": "LONG"},
+            {"algoId": 789, "symbol": "ETHUSDT", "side": "SELL", "positionSide": "LONG"},
+        ]
+
+        await position_manager._clean_orphan_orders([], [], algo_orders)
+
+        # Should only cancel the valid one
+        mock_exchange.cancel_algo_order.assert_called_once_with("ETHUSDT", algo_id=789)
+
+    @pytest.mark.asyncio
+    async def test_algo_id_string_converted_to_int(self, position_manager, mock_exchange):
+        """
+        BUG SCENARIO: API returns algoId as string "12345" instead of int.
+        Should convert and work.
+        """
+        mock_exchange.cancel_algo_order = AsyncMock(return_value=True)
+
+        algo_orders = [
+            {"algoId": "12345", "symbol": "BTCUSDT", "side": "SELL", "positionSide": "LONG"},
+        ]
+
+        await position_manager._clean_orphan_orders([], [], algo_orders)
+
+        # Should convert to int
+        mock_exchange.cancel_algo_order.assert_called_once_with("BTCUSDT", algo_id=12345)
+
+    @pytest.mark.asyncio
+    async def test_grace_period_exact_boundary_60_seconds(
+        self, position_manager, mock_exchange
+    ):
+        """
+        BUG SCENARIO: Grace period exactly at 60 seconds.
+        Should NOT cancel (boundary inclusive).
+        """
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+
+        # Exactly 60 seconds ago
+        position_manager._recently_closed_symbols["BTCUSDT"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=60)
+        )
+
+        orders = [
+            {"orderId": "123", "symbol": "BTCUSDT", "side": "SELL", "positionSide": "LONG"},
+        ]
+
+        await position_manager._clean_orphan_orders([], orders, [])
+
+        # At exactly 60 seconds, should still be protected (> not >=)
+        mock_exchange.cancel_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_multiple_orphans_all_cancelled(self, position_manager, mock_exchange):
+        """
+        STRESS TEST: 5 orphan orders, all should be cancelled.
+        Stats should accumulate correctly.
+        """
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+        mock_exchange.cancel_algo_order = AsyncMock(return_value=True)
+
+        orders = [
+            {"orderId": "1", "symbol": "BTCUSDT", "side": "SELL", "positionSide": "LONG"},
+            {"orderId": "2", "symbol": "ETHUSDT", "side": "SELL", "positionSide": "LONG"},
+            {"orderId": "3", "symbol": "SOLUSDT", "side": "BUY", "positionSide": "SHORT"},
+        ]
+        algo_orders = [
+            {"algoId": 100, "symbol": "XRPUSDT", "side": "SELL", "positionSide": "LONG"},
+            {"algoId": 200, "symbol": "DOGEUSDT", "side": "BUY", "positionSide": "SHORT"},
+        ]
+
+        await position_manager._clean_orphan_orders([], orders, algo_orders)
+
+        assert mock_exchange.cancel_order.call_count == 3
+        assert mock_exchange.cancel_algo_order.call_count == 2
+        assert position_manager._stats["orphans_cleaned"] == 5
+
+    @pytest.mark.asyncio
+    async def test_stats_accumulate_across_calls(self, position_manager, mock_exchange):
+        """
+        BUG SCENARIO: Stats should accumulate, not reset.
+        """
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+
+        orders1 = [{"orderId": "1", "symbol": "BTCUSDT", "side": "SELL", "positionSide": "LONG"}]
+        orders2 = [{"orderId": "2", "symbol": "ETHUSDT", "side": "SELL", "positionSide": "LONG"}]
+
+        await position_manager._clean_orphan_orders([], orders1, [])
+        assert position_manager._stats["orphans_cleaned"] == 1
+
+        await position_manager._clean_orphan_orders([], orders2, [])
+        assert position_manager._stats["orphans_cleaned"] == 2  # Accumulated, not reset!
+
+    @pytest.mark.asyncio
+    async def test_empty_orders_no_crash(self, position_manager, mock_exchange):
+        """Edge case: Empty orders lists."""
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+
+        # Should not crash with empty lists
+        await position_manager._clean_orphan_orders([], [], [])
+        mock_exchange.cancel_order.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_grace_period_cleanup_happens(self, position_manager, mock_exchange):
+        """
+        Verify old grace period entries are cleaned up.
+        """
+        # Add expired entry
+        position_manager._recently_closed_symbols["OLDUSDT"] = (
+            datetime.now(timezone.utc) - timedelta(seconds=120)
+        )
+        # Add fresh entry
+        position_manager._recently_closed_symbols["NEWUSDT"] = datetime.now(timezone.utc)
+
+        await position_manager._clean_orphan_orders([], [], [])
+
+        # Old one should be removed
+        assert "OLDUSDT" not in position_manager._recently_closed_symbols
+        # Fresh one should remain
+        assert "NEWUSDT" in position_manager._recently_closed_symbols
+
+    @pytest.mark.asyncio
+    async def test_same_symbol_different_position_sides(
+        self, position_manager, mock_exchange
+    ):
+        """
+        COMPLEX SCENARIO: Same symbol, both LONG and SHORT positions exist.
+        Should NOT cancel any orders.
+        """
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+
+        # Both LONG and SHORT exist for BTCUSDT
+        positions = [
+            {"symbol": "BTCUSDT", "positionSide": "LONG", "positionAmt": "0.001"},
+            {"symbol": "BTCUSDT", "positionSide": "SHORT", "positionAmt": "-0.001"},
+        ]
+        # Orders for both sides
+        orders = [
+            {"orderId": "1", "symbol": "BTCUSDT", "side": "SELL", "positionSide": "LONG"},
+            {"orderId": "2", "symbol": "BTCUSDT", "side": "BUY", "positionSide": "SHORT"},
+        ]
+
+        await position_manager._clean_orphan_orders(positions, orders, [])
+
+        # Neither should be cancelled
+        mock_exchange.cancel_order.assert_not_called()
+
+
+# =============================================================================
+# INTEGRATION TEST - Verify REST sync actually calls orphan cleanup
+# =============================================================================
+
+class TestOrphanCleanupIntegration:
+    """Integration tests for orphan cleanup in REST sync."""
+
+    @pytest.mark.asyncio
+    async def test_perform_rest_sync_calls_clean_orphans(
+        self, position_manager, mock_exchange, mock_trade_engine
+    ):
+        """
+        CRITICAL: Verify _perform_rest_sync actually calls _clean_orphan_orders
+        with the correct data.
+        """
+        # Mock all exchange methods
+        mock_exchange.get_all_positions = AsyncMock(return_value=[
+            {"symbol": "BTCUSDT", "positionSide": "LONG", "positionAmt": "0.001"}
+        ])
+        mock_exchange.get_open_orders = AsyncMock(return_value=[
+            {"orderId": "123", "symbol": "ETHUSDT", "side": "SELL", "positionSide": "LONG"}
+        ])
+        mock_exchange.get_open_algo_orders = AsyncMock(return_value=[
+            {"algoId": 456, "symbol": "SOLUSDT", "side": "SELL", "positionSide": "LONG"}
+        ])
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+        mock_exchange.cancel_algo_order = AsyncMock(return_value=True)
+
+        # Mock trade_engine to have no positions (so no tracked positions to check)
+        mock_trade_engine.get_open_positions = MagicMock(return_value=[])
+
+        # Run REST sync
+        await position_manager._perform_rest_sync()
+
+        # Verify orphans were cleaned
+        # ETHUSDT order should be cancelled (no position for ETHUSDT LONG)
+        mock_exchange.cancel_order.assert_called_once_with("ETHUSDT", "123")
+        # SOLUSDT algo should be cancelled (no position for SOLUSDT LONG)
+        mock_exchange.cancel_algo_order.assert_called_once_with("SOLUSDT", algo_id=456)
+
+    @pytest.mark.asyncio
+    async def test_rest_sync_preserves_valid_orders(
+        self, position_manager, mock_exchange, mock_trade_engine
+    ):
+        """
+        Verify REST sync does NOT cancel orders for existing positions.
+        """
+        # Position exists
+        mock_exchange.get_all_positions = AsyncMock(return_value=[
+            {"symbol": "BTCUSDT", "positionSide": "LONG", "positionAmt": "0.001"}
+        ])
+        # Order for that position
+        mock_exchange.get_open_orders = AsyncMock(return_value=[
+            {"orderId": "123", "symbol": "BTCUSDT", "side": "SELL", "positionSide": "LONG"}
+        ])
+        mock_exchange.get_open_algo_orders = AsyncMock(return_value=[])
+        mock_exchange.cancel_order = AsyncMock(return_value=True)
+
+        mock_trade_engine.get_open_positions = MagicMock(return_value=[])
+
+        await position_manager._perform_rest_sync()
+
+        # Should NOT cancel - position exists
+        mock_exchange.cancel_order.assert_not_called()

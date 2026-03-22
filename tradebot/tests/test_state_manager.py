@@ -18,7 +18,7 @@ import asyncio
 import json
 import os
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Dict, Any
@@ -109,7 +109,7 @@ def open_position():
         entry_order_id="ENTRY_001",
         sl_order_id="SL_001",
         tp_order_id="TP_001",
-        opened_at=datetime.utcnow() - timedelta(days=2),
+        opened_at=datetime.now(timezone.utc) - timedelta(days=2),
         strategy="test_strategy",
         regime_action="FULL",
         max_hold_days=14,
@@ -286,15 +286,19 @@ class TestRestoreAndSync:
                 "positionSide": "LONG",
             }
         ])
-        mock_exchange.get_open_orders = AsyncMock(return_value=[
+        # Regular orders (TP LIMIT orders)
+        mock_exchange.get_open_orders = AsyncMock(return_value=[])
+        # SL orders are Algo orders (not returned by get_open_orders!)
+        # Fields for Algo Order API: orderType (not type), algoId (not orderId)
+        mock_exchange.get_open_algo_orders = AsyncMock(return_value=[
             {
-                "orderId": "SL_FROM_EXCHANGE",
+                "algoId": 123456789,
                 "symbol": "BTCUSDT",
-                "type": "STOP_MARKET",
+                "orderType": "STOP_MARKET",  # Algo API uses orderType, not type
                 "side": "SELL",
                 "positionSide": "LONG",
-                "stopPrice": "48000.0",
-                "reduceOnly": True,
+                "origQty": "0.001",
+                "algoStatus": "NEW",
             }
         ])
 
@@ -311,7 +315,7 @@ class TestRestoreAndSync:
         """restore_and_sync() should create missing SL order."""
         # Create saved state with SL price
         saved_state = {
-            "saved_at": datetime.utcnow().isoformat(),
+            "saved_at": datetime.now(timezone.utc).isoformat(),
             "version": "1.1",
             "positions": {
                 "POS_001": {
@@ -324,7 +328,7 @@ class TestRestoreAndSync:
                     "stop_loss": 48000.0,
                     "take_profit": 55000.0,
                     "status": "OPEN",
-                    "opened_at": (datetime.utcnow() - timedelta(days=2)).isoformat(),
+                    "opened_at": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
                     "max_hold_days": 14,
                 }
             },
@@ -362,7 +366,7 @@ class TestRestoreAndSync:
         """restore_and_sync() should close expired positions."""
         # Create saved state with OLD position
         saved_state = {
-            "saved_at": datetime.utcnow().isoformat(),
+            "saved_at": datetime.now(timezone.utc).isoformat(),
             "version": "1.1",
             "positions": {
                 "POS_EXPIRED": {
@@ -375,7 +379,7 @@ class TestRestoreAndSync:
                     "stop_loss": 48000.0,
                     "take_profit": 55000.0,
                     "status": "OPEN",
-                    "opened_at": (datetime.utcnow() - timedelta(days=20)).isoformat(),  # 20 days ago!
+                    "opened_at": (datetime.now(timezone.utc) - timedelta(days=20)).isoformat(),  # 20 days ago!
                     "max_hold_days": 14,
                 }
             },
@@ -644,7 +648,7 @@ class TestMetricsRestoration:
         """MetricsTracker should be restored from saved state."""
         # Create saved state with metrics
         saved_state = {
-            "saved_at": datetime.utcnow().isoformat(),
+            "saved_at": datetime.now(timezone.utc).isoformat(),
             "version": "1.1",
             "positions": {},
             "trade_engine_stats": {},
@@ -652,7 +656,7 @@ class TestMetricsRestoration:
             "missing_tp_positions": {},
             "metrics": {
                 "initial_balance": 1000.0,
-                "start_time": datetime.utcnow().isoformat(),
+                "start_time": datetime.now(timezone.utc).isoformat(),
                 "trades": [
                     {
                         "symbol": "BTCUSDT",
@@ -663,8 +667,8 @@ class TestMetricsRestoration:
                         "realized_pnl": 5.0,
                         "exit_reason": "TP",
                         "strategy": "test",
-                        "opened_at": datetime.utcnow().isoformat(),
-                        "closed_at": datetime.utcnow().isoformat(),
+                        "opened_at": datetime.now(timezone.utc).isoformat(),
+                        "closed_at": datetime.now(timezone.utc).isoformat(),
                         "hold_duration_hours": 1.0,
                     }
                 ],

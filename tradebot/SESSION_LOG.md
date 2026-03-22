@@ -2883,3 +2883,1095 @@ while self._running:
 | Реально нет TP | Warning через 10 мин | Warning через 5 сек ✓ |
 
 ---
+
+## [2026-03-09] КРИТИЧЕСКИЙ БАГ: REST sync закрывал ВСЕ позиции по SYNC_FIX
+
+### Проблема
+
+Анализ `tradebot_state.json` показал что ВСЕ 33 закрытых позиции имеют `exit_reason="SYNC_FIX"`.
+НИ ОДНА позиция не закрылась по SL, TP или Trailing Stop.
+
+### Причина
+
+**Файл:** `position_manager.py`, функция `_perform_rest_sync()`
+
+```python
+# Line 873 - получает ТОЛЬКО обычные ордера
+exchange_orders = await self.exchange.get_open_orders()
+
+# Line 884 - словарь по orderId
+exchange_order_ids = {str(o.get("orderId", "")): o for o in exchange_orders}
+
+# Line 901 - проверка SL
+if position.sl_order_id and position.sl_order_id not in exchange_order_ids:
+    # SL ордер не найден → добавить в positions_to_close → SYNC_FIX
+```
+
+**Но:**
+- SL размещается через **Algo Order API** (interfaces.py:112-125)
+- `sl_order_id` содержит **algoId** (из state.json: `"3000000907876424"`)
+- `get_open_orders()` **НЕ возвращает Algo ордера** (interfaces.py:221-222)
+
+**Результат:** REST sync не находил SL ордера (искал в обычных, а SL в Algo) → считал что SL исполнился → закрывал позицию.
+
+### Исправление
+
+**Файл:** `position_manager.py:875-894`
+
+Добавлено получение Algo ордеров и их algoId в словарь:
+
+```python
+# 2. Получаем открытые ордера с биржи
+exchange_orders = await self.exchange.get_open_orders()
+
+# 2.1. Получаем Algo ордера (SL STOP_MARKET, Trailing Stop)
+# ВАЖНО: get_open_orders() НЕ возвращает Algo ордера!
+exchange_algo_orders = await self.exchange.get_open_algo_orders()
+
+# ...
+
+# Создаём dict order_id -> order для быстрого поиска
+exchange_order_ids = {str(o.get("orderId", "")): o for o in exchange_orders}
+
+# Добавляем Algo ордера по algoId (SL и Trailing Stop хранят algoId, не orderId)
+for algo_order in exchange_algo_orders:
+    algo_id = str(algo_order.get("algoId", ""))
+    if algo_id:
+        exchange_order_ids[algo_id] = algo_order
+```
+
+### Результат
+
+Теперь REST sync корректно находит SL/Trailing Stop ордера по algoId и не закрывает позиции ошибочно.
+
+---
+
+## 2026-03-09: SL/TP расчёт от реального entry_price
+
+### Проблема
+
+SL и TP рассчитывались от `signal.entry` (OPEN дневной свечи), а не от реальной цены исполнения.
+Это приводило к тому, что эффективный SL% отличался от заданного:
+- Если рынок двигался благоприятно → SL% увеличивался (например 6% вместо 4%)
+- Если рынок двигался против → SL% уменьшался
+
+### Изменения
+
+**Файл: `trade_engine.py`**
+
+1. Добавлены параметры `sl_pct` и `tp_pct` в `__init__`:
+```python
+sl_pct: float = 4.0,
+tp_pct: float = 10.0,
+```
+
+2. SL теперь считается от `entry_price` (строки 381-386):
+```python
+if signal.direction == "SHORT":
+    sl_price_raw = entry_price * (Decimal("1") + Decimal(str(self.sl_pct / 100)))
+else:
+    sl_price_raw = entry_price * (Decimal("1") - Decimal(str(self.sl_pct / 100)))
+sl_price = self.exchange.round_price(signal.symbol, sl_price_raw)
+```
+
+3. TP теперь считается от `entry_price` (строки 430-435):
+```python
+if signal.direction == "SHORT":
+    tp_price_raw = entry_price * (Decimal("1") - Decimal(str(self.tp_pct / 100)))
+else:
+    tp_price_raw = entry_price * (Decimal("1") + Decimal(str(self.tp_pct / 100)))
+tp_price = self.exchange.round_price(signal.symbol, tp_price_raw)
+```
+
+**Файл: `trade_app.py`**
+
+Передача `sl_pct` и `tp_pct` при создании TradeEngine (строки 419-420):
+```python
+sl_pct=self.sl_pct,
+tp_pct=self.tp_pct,
+```
+
+### Результат
+
+Теперь SL и TP гарантированно выставляются на заданном проценте от РЕАЛЬНОЙ цены входа.
+Trailing Stop уже ранее использовал `entry_price` - изменений не требовалось.
+
+---
+
+## 2026-03-09: Исправление WebSocket мониторинга и отмены Algo ордеров
+
+### Проблемы
+
+1. **Формат callback не совпадал**: binance.py отправлял плоский dict `{"orderId": ...}`,
+   а position_manager ожидал вложенный `{"o": {"i": ...}}`
+2. **cancel_order для Algo**: использовался `/fapi/v1/order` вместо `/fapi/v1/algoOrder`
+3. **Нет алертов**: позиции закрывались только через REST sync (SYNC_FIX)
+
+### Изменения
+
+**Файл: `adapters/binance.py`**
+
+1. Добавлено поле `avgPrice` в ALGO_UPDATE (строка 1436):
+```python
+"avgPrice": order_data.get("ap", "0"),
+```
+
+2. Добавлено поле `realizedPnl` в ORDER_TRADE_UPDATE (строка 1358):
+```python
+"realizedPnl": order_data.get("rp", "0"),
+```
+
+**Файл: `engine/position_manager.py`**
+
+1. Импорт `PositionSide` для расчёта PnL (строка 19)
+
+2. `_handle_order_update` переписан для плоского формата:
+   - `order_info.get("orderId")` вместо `event.get("o", {}).get("i")`
+   - `order_info.get("status")` вместо `order_data.get("X")`
+   - Расчёт realized_pnl для ALGO_UPDATE (нет поля rp)
+
+3. `_cancel_remaining_order` исправлен:
+   - SL → `cancel_algo_order(algo_id=...)`
+   - Trailing Stop → `cancel_algo_order(algo_id=...)`
+   - TP → `cancel_order(orderId)` (без изменений)
+
+4. `_close_position_timeout` исправлен:
+   - SL и Trailing Stop используют `cancel_algo_order`
+
+5. `_close_position_missing_tp` исправлен:
+   - SL и Trailing Stop используют `cancel_algo_order`
+
+6. Добавлен `_cancel_all_position_orders` — отменяет все ордера позиции
+
+7. `_close_position_sync_fix` теперь вызывает `_cancel_all_position_orders`
+
+### API References
+
+- [Cancel Algo Order](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Cancel-Algo-Order) - `DELETE /fapi/v1/algoOrder` с `algoId`
+- [Event Algo Order Update](https://developers.binance.com/docs/derivatives/usds-margined-futures/user-data-streams/Event-Algo-Order-Update) - структура ALGO_UPDATE
+
+### Результат
+
+Теперь:
+- WebSocket мониторинг корректно детектит закрытие по SL/TP/Trailing
+- Оставшиеся ордера правильно отменяются через соответствующие API
+- Алерты отправляются при закрытии позиций
+- REST sync корректно чистит stale ордера
+
+---
+
+## 2026-03-09: Исправление статусов ALGO_UPDATE
+
+### Проблема
+
+Неправильная обработка статусов ALGO_UPDATE по документации Binance:
+
+**Было (НЕПРАВИЛЬНО):**
+```python
+# Игнорировали FINISHED (а это финальный статус!)
+if algo_status in ("TRIGGERING", "FINISHED"):
+    return
+
+# Считали TRIGGERED = FILLED (но это промежуточный!)
+"TRIGGERED": "FILLED"
+```
+
+### Статусы по документации Binance
+
+| Статус | Значение | Действие |
+|--------|----------|----------|
+| NEW | Ордер создан, не сработал | Игнорировать |
+| TRIGGERING | Условие сработало, передаётся в engine | Игнорировать |
+| TRIGGERED | Передан в matching engine | Игнорировать (ещё НЕ исполнен!) |
+| **FINISHED** | **Исполнен ИЛИ отменён** | **Обработать!** |
+| CANCELED | Отменён вручную | Обработать |
+| REJECTED | Отклонён engine | Обработать |
+| EXPIRED | Отменён системой | Обработать |
+
+### Исправление (binance.py)
+
+```python
+# Игнорируем промежуточные (ордер ещё не завершён)
+if algo_status in ("NEW", "TRIGGERING", "TRIGGERED"):
+    return
+
+# FINISHED = финальный статус
+if algo_status == "FINISHED":
+    if executed_qty > 0:
+        mapped_status = "FILLED"  # Исполнен!
+    else:
+        mapped_status = "CANCELED"  # Отменён в engine
+elif algo_status in ("CANCELED", "REJECTED", "EXPIRED"):
+    mapped_status = "CANCELED"
+```
+
+### Источник
+
+[Event Algo Order Update - Binance API](https://developers.binance.com/docs/derivatives/usds-margined-futures/user-data-streams/Event-Algo-Order-Update)
+
+---
+
+## 2026-03-09: Исправление 12 критических проблем
+
+### Сессия: Полный аудит и исправление бота
+
+### Проблемы #1-6 (Критичные - потеря денег)
+
+#### #1: PnL расчёт с executedQty=0
+**Файл:** `position_manager.py:317-322`
+```python
+# БЫЛО:
+qty = float(order_info.get("executedQty", position.quantity))
+
+# СТАЛО:
+raw_qty = float(order_info.get("executedQty", 0))
+qty = raw_qty if raw_qty > 0 else float(position.quantity)
+```
+
+#### #2: Округление цены через //
+**Файл:** `binance.py:842-860`
+```python
+# БЫЛО:
+return (price // tick_size) * tick_size
+
+# СТАЛО (с Decimal.quantize):
+return (price / tick_size).quantize(Decimal("1"), rounding=ROUND_DOWN) * tick_size
+```
+
+#### #3: Проверка баланса перед entry
+**Файл:** `trade_engine.py:257-283`
+- Добавлена проверка `availableBalance` перед entry
+- Требуемая маржа = (notional / leverage) * 1.1
+
+#### #4: Race condition на открытие позиции
+**Файл:** `trade_engine.py:104-145`
+- Добавлен `_symbol_locks: Dict[str, asyncio.Lock]`
+- Вся логика execute_signal обёрнута в `async with lock`
+
+#### #5: Cancel ордеров без retry
+**Файл:** `position_manager.py:420-530`
+- Новый метод `_cancel_order_with_retry()` с 3 попытками
+- Очередь `_pending_cancels` для неудачных отмен
+- Фоновая задача `_cancel_retry_loop()`
+
+#### #6: Trailing Stop activation_pct
+**НЕ БАГ** - корректное поведение по Binance API.
+
+### Проблемы #7-12 (Высокие - сбои)
+
+#### #7: Race condition в REST sync
+**Файл:** `position_manager.py:1095`
+```python
+# БЫЛО:
+for position in self.trade_engine.get_open_positions():
+
+# СТАЛО:
+open_positions_snapshot = list(self.trade_engine.get_open_positions())
+for position in open_positions_snapshot:
+```
+
+#### #8: Partial fill с executedQty=0
+**Файл:** `trade_engine.py:396-427`
+- Добавлена проверка `if real_qty == 0` после получения позиции с биржи
+
+#### #9: WebSocket reconnect failure
+**Файл:** `binance.py:1503-1560`
+- Переписан `_reconnect_ws()` с retry и exponential backoff (до 10 попыток)
+- Задержка: 5s, 10s, 20s, ... max 5min
+
+#### #10: Бесконечный цикл step_size=0
+**Файл:** `trade_engine.py:241-259`
+```python
+if step_size <= 0:
+    step_size = Decimal("0.001")  # fallback
+
+max_iterations = 1000
+while quantity * current_price < min_notional and iterations < max_iterations:
+    quantity += step_size
+    iterations += 1
+```
+
+#### #11: sl_price == entry_price после округления
+**Файл:** `trade_engine.py:461-478`
+```python
+if sl_price == entry_price:
+    tick_size = self.exchange.get_tick_size(signal.symbol)
+    if signal.direction == "SHORT":
+        sl_price = entry_price + tick_size
+    else:
+        sl_price = entry_price - tick_size
+```
+
+#### #12: TP и Trailing падают
+**Файл:** `trade_engine.py:665-673`
+- Добавлен детальный alert когда оба TP механизма провалились
+
+### Новые методы
+
+- `binance.py:get_tick_size()` - получить минимальный шаг цены
+- `position_manager.py:_cancel_order_with_retry()` - отмена с retry
+- `position_manager.py:_cancel_retry_loop()` - фоновая обработка очереди
+- `trade_engine.py:_get_symbol_lock()` - lock для защиты от race condition
+
+### Статус
+Все 12 проблем исправлены. Код компилируется.
+
+---
+
+## 2026-03-09: Исправление проблем #14, #15 (средние)
+
+### #14: Позиция остаётся OPEN если close_position() вернул False
+
+**Файл:** `position_manager.py:648, 882`
+
+```python
+# БЫЛО:
+for position in expired_positions:
+    await self._close_position_timeout(position)
+
+# СТАЛО:
+for position in expired_positions:
+    success = await self._close_position_timeout(position)
+    if not success:
+        logger.error(f"Failed to close timeout position, will retry...")
+```
+
+Аналогично для `_close_position_missing_tp`.
+
+### #15: Утечка памяти - накопление закрытых позиций
+
+**Файл:** `trade_engine.py:902-930`
+
+Добавлен метод `cleanup_old_positions(max_age_days=7)`:
+- Удаляет закрытые позиции старше 7 дней
+- Вызывается каждые 10 итераций REST sync (~100 минут)
+- Сохраняет свежие позиции для signal dedup
+
+```python
+def cleanup_old_positions(self, max_age_days: int = 7) -> int:
+    """Очистить старые закрытые позиции из памяти."""
+    cutoff = datetime.utcnow() - timedelta(days=max_age_days)
+    to_delete = [pos_id for pos_id, p in self.positions.items()
+                 if not p.is_open and p.closed_at and p.closed_at < cutoff]
+    for pos_id in to_delete:
+        del self.positions[pos_id]
+    return len(to_delete)
+```
+
+### Примечания
+
+- **#18** (Signal dedup) - УЖЕ ИСПРАВЛЕНО ранее (trade_app.py:1271)
+- **#20** (Float в PnL) - УЖЕ ИСПОЛЬЗУЕТ DECIMAL (backtester/models.py:410-411)
+
+### Статус
+Все проблемы исправлены. Код компилируется.
+
+---
+
+## 2026-03-09: Тестирование критических исправлений
+
+### Создан файл тестов
+
+**Файл:** `tradebot/tests/test_critical_fixes.py`
+
+17 тест-кейсов симулирующих реальные live сценарии.
+
+### Результаты тестирования
+
+| # | Тест | Что проверяет | Результат |
+|---|------|---------------|-----------|
+| 1 | `test_pnl_uses_position_quantity_when_executed_qty_zero` | ALGO_UPDATE с executedQty=0 использует position.quantity | ✅ |
+| 2 | `test_pnl_uses_actual_qty_when_provided` | ALGO_UPDATE с реальным qty использует его | ✅ |
+| 3 | `test_price_rounds_down_correctly` | Decimal.quantize ROUND_DOWN работает | ✅ |
+| 4 | `test_skip_signal_if_insufficient_balance` | Пропуск при недостаточном балансе | ✅ |
+| 5 | `test_proceed_if_sufficient_balance` | Успешный entry при достаточном балансе | ✅ |
+| 6 | `test_concurrent_signals_use_lock` | Один Lock на символ | ✅ |
+| 7 | `test_lock_prevents_duplicate_positions` | Lock предотвращает дубликаты | ✅ |
+| 8 | `test_cancel_retries_on_failure` | Cancel делает retry при ошибке | ✅ |
+| 9 | `test_cancel_adds_to_queue_after_max_retries` | После max retries - в очередь | ✅ |
+| 10 | `test_cancel_succeeds_if_order_not_found` | "Not found" = успех | ✅ |
+| 11 | `test_get_open_positions_returns_copy` | Копия списка для итерации | ✅ |
+| 12 | `test_reconnect_retries_with_backoff` | WS reconnect с backoff | ✅ |
+| 13 | `test_handles_zero_step_size` | Защита от step_size=0 | ✅ |
+| 14 | `test_sl_adjusted_when_equals_entry` | SL != entry после округления | ✅ |
+| 15 | `test_failed_close_logged_for_retry` | Retry при failed close | ✅ |
+| 16 | `test_cleanup_removes_old_closed_positions` | Cleanup старых позиций | ✅ |
+| 17 | `test_signal_dedup_works_with_fresh_positions` | Signal dedup работает | ✅ |
+
+### Баг найден тестами
+
+**Проблема:** При рефакторинге для Lock (#4) параметр `regime_action` не передавался в `_execute_signal_locked`.
+
+**Файл:** `trade_engine.py:205-208, 210-222`
+
+**Ошибка:**
+```
+NameError: name 'regime_action' is not defined
+```
+
+**Исправление:**
+```python
+# БЫЛО:
+return await self._execute_signal_locked(
+    signal, size_usd, entry_result, entry_price, entry_order_id,
+    quantity, exit_side, position_side, sl_price, tp_price
+)
+
+# СТАЛО:
+return await self._execute_signal_locked(
+    signal, size_usd, regime_action, entry_result, entry_price, entry_order_id,
+    quantity, exit_side, position_side, sl_price, tp_price
+)
+```
+
+И добавлен параметр в сигнатуру `_execute_signal_locked`.
+
+### Запуск тестов
+
+```bash
+python -m pytest tradebot/tests/test_critical_fixes.py -v
+```
+
+### Статус
+Все 17 тестов проходят. Баг найден и исправлен.
+
+---
+
+## 2026-03-09: КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ #6-#10
+
+### Задача
+Исправить 5 критических проблем из таблицы:
+
+| # | Файл | Проблема |
+|---|------|----------|
+| 6 | trade_app.py:1460 | State loss при crash: Между execute_signal и save_state - если crash, позиция на бирже но не в state |
+| 7 | position_manager.py:284-294 | PARTIALLY_FILLED игнорируется: TP может частично исполниться → неправильное состояние |
+| 8 | binance.py:1510-1560 | WebSocket reconnect теряет события: Между disconnect и reconnect могут пропасть события |
+| 9 | trade_engine.py:604-608 | Trailing fail → нет TP: Если trailing_stop_use_instead_of_tp=True и trailing fail → позиция без exit |
+| 10 | trade_app.py:602 | _running=True до запуска PM: Если PM не запустится - состояние несогласовано |
+
+### FIX #6: State loss при crash
+
+**Проблема:** Если crash между `execute_signal()` и `save_state()`, позиция на бирже но не в state file.
+
+**Решение:**
+1. Добавлен callback `on_state_changed` в TradeEngine
+2. Callback вызывается СРАЗУ после добавления позиции в `positions` dict
+3. Callback подключен в TradeApp к `state_manager.save_state()`
+
+**Файлы изменены:**
+- `trade_engine.py`: Добавлен `self.on_state_changed` и вызов после `self.positions[position.position_id] = position`
+- `trade_app.py`: Добавлен метод `_on_state_changed()` и подключение callback
+
+### FIX #7: PARTIALLY_FILLED обработка
+
+**Проблема:** Если TP частично исполнился а потом отменён - `position.quantity` не обновляется.
+
+**Решение:**
+1. Добавлено поле `exit_filled_qty` в Position model
+2. При PARTIALLY_FILLED обновляем `position.exit_filled_qty`
+3. При CANCELLED после partial fill:
+   - Если >= 99% filled → закрываем позицию
+   - Иначе → обновляем `position.quantity` на оставшееся и регистрируем missing TP
+4. Добавлен метод `_close_position_partial()` для закрытия partial fill позиций
+
+**Файлы изменены:**
+- `core/models.py`: Добавлено поле `exit_filled_qty: float = 0.0`
+- `position_manager.py`: Обновлена логика `_handle_order_update()` для PARTIALLY_FILLED и CANCELLED
+
+### FIX #8: WebSocket reconnect REST sync
+
+**Проблема:** Во время disconnect и reconnect (5s - 5min) события пропускаются.
+
+**Решение:**
+1. Добавлен callback `on_ws_reconnected` в BinanceFuturesAdapter
+2. После успешного reconnect вызывается callback
+3. Callback запускает REST sync для восстановления пропущенных событий
+
+**Файлы изменены:**
+- `adapters/binance.py`: Добавлен `self.on_ws_reconnected` и вызов в `_reconnect_ws()`
+- `trade_app.py`: Добавлен метод `_on_ws_reconnected()` который вызывает `perform_rest_sync()`
+
+### FIX #9: Trailing Stop cancelled fallback
+
+**Проблема:** Если trailing_stop успешно поставлен но потом CANCELLED/REJECTED/EXPIRED биржей - позиция без exit.
+
+**Решение:**
+1. При CANCELLED trailing stop БЕЗ partial fill:
+   - Очищаем `trailing_stop_order_id` и `trailing_stop_enabled`
+   - Если нет TP → регистрируем для missing TP мониторинга
+   - Вызываем warning callback
+
+**Файлы изменены:**
+- `position_manager.py`: Добавлена обработка CANCELLED trailing stop в `_handle_order_update()`
+
+### FIX #10: _running=True порядок
+
+**Проблема:** `_running=True` устанавливалось ПОСЛЕ запуска background tasks, что противоречило комментарию и могло вызвать race condition.
+
+**Решение:**
+Переместить `self._running = True` ДО вызова `position_manager.start()` и создания `_keyboard_listener_task`.
+
+**Файлы изменены:**
+- `trade_app.py`: Перемещена строка `self._running = True` перед PM.start()
+
+### Тесты
+
+Добавлены тесты для всех 5 исправлений в `test_critical_fixes.py`:
+- `TestFix6StateChangeCallback`: 2 теста
+- `TestFix7PartiallyFilledExitOrders`: 2 теста
+- `TestFix8WebSocketReconnectCallback`: 1 тест
+- `TestFix9TrailingStopCancelled`: 2 теста
+- `TestFix10RunningFlagOrder`: 1 тест
+
+### Результаты тестов
+
+```bash
+python -m pytest tradebot/tests/ -v
+# 260 passed in 15.63s
+```
+
+Все 260 тестов проходят успешно.
+
+---
+
+## 2026-03-09: FIX #11-#15 - Deprecation и улучшения
+
+### FIX #11: datetime.utcnow() deprecated
+
+**Проблема:** `datetime.utcnow()` deprecated в Python 3.12+, нужно использовать timezone-aware datetime.
+
+**Решение:**
+Заменить все `datetime.utcnow()` на `datetime.now(timezone.utc)` во всех файлах:
+- `models.py`: TradeOrder.__post_init__, Position.__post_init__, is_expired(), get_hold_days()
+- `trade_engine.py`: opened_at, closed_at, cleanup cutoff
+- `position_manager.py`: все closed_at (6 мест)
+- `state_manager.py`: saved_at, opened_at, max_hold_days check
+- `trade_app.py`: now_utc в late signal check
+- Все тестовые файлы обновлены для консистентности
+
+**Файлы изменены:**
+- `core/models.py`
+- `engine/trade_engine.py`
+- `engine/position_manager.py`
+- `engine/state_manager.py`
+- `trade_app.py`
+- `tests/*.py` (все тестовые файлы)
+
+### FIX #12: is_active property
+
+**Проблема:** `is_open` возвращает True только для OPEN статуса. Нужен метод для проверки "позиция не закрыта" (включая PENDING).
+
+**Решение:**
+Добавлен новый property `is_active` в Position:
+```python
+@property
+def is_active(self) -> bool:
+    """True если позиция не закрыта (PENDING или OPEN)."""
+    return self.status in (PositionStatus.PENDING, PositionStatus.OPEN)
+```
+
+**Файлы изменены:**
+- `core/models.py`: Добавлен `is_active` property
+
+### FIX #13: get_hold_days для закрытой позиции
+
+**Проблема:** `get_hold_days()` всегда считает от `now`, даже для закрытых позиций. Нужно использовать `closed_at`.
+
+**Решение:**
+```python
+def get_hold_days(self) -> float:
+    if not self.opened_at:
+        return 0.0
+    # FIX #13: Для закрытой позиции считаем до closed_at, не до now
+    if self.closed_at:
+        hold_duration = self.closed_at - self.opened_at
+    else:
+        hold_duration = datetime.now(timezone.utc) - self.opened_at
+    return hold_duration.total_seconds() / (24 * 3600)
+```
+
+**Файлы изменены:**
+- `core/models.py`: Исправлен `get_hold_days()`
+
+### FIX #14: Агрессивный WebSocket ping
+
+**Проблема:** `ping_interval=20`, `ping_timeout=10` - слишком агрессивно для медленных сетей.
+
+**Решение:**
+Увеличены минимальные разумные значения:
+- `ping_interval=30` (было 20)
+- `ping_timeout=20` (было 10)
+
+**Файлы изменены:**
+- `adapters/binance.py`: Обновлены ping settings в `start_user_data_stream()` и `_reconnect_ws()`
+
+### FIX #15: Timeout на download
+
+**Проблема:** `download_with_coinalyze_backfill()` может зависнуть без timeout.
+
+**Решение:**
+```python
+# 2. Скачиваем данные с timeout (FIX #15)
+logger.info("[1/4] Downloading data...")
+try:
+    # Синхронная функция в отдельном потоке с timeout 60s
+    history = await asyncio.wait_for(
+        asyncio.to_thread(
+            self.downloader.download_with_coinalyze_backfill,
+            symbols, start, end
+        ),
+        timeout=60.0  # Минимальный разумный timeout для download
+    )
+except asyncio.TimeoutError:
+    logger.error("Download timeout (60s) - skipping this cycle")
+    return
+```
+
+**Файлы изменены:**
+- `trade_app.py`: Добавлен `asyncio.wait_for` с timeout=60s
+
+### Тесты
+
+Добавлены 10 новых тестов в `test_critical_fixes.py`:
+- `TestFix11DatetimeTimezoneAware`: 3 теста
+- `TestFix12IsActiveProperty`: 3 теста
+- `TestFix13GetHoldDaysForClosedPosition`: 2 теста
+- `TestFix14WebSocketPingSettings`: 1 тест
+- `TestFix15DownloadTimeout`: 1 тест
+
+### Результаты тестов
+
+```bash
+python -m pytest tradebot/tests/ -v
+# 270 passed in 16.62s
+```
+
+Все 270 тестов проходят успешно (260 существующих + 10 новых).
+
+---
+
+## 2026-03-09: Архитектурные улучшения - синхронизация, защита, мониторинг
+
+### Проблема 1: Глобальное состояние Position.status
+
+**Проблема:** Position.status обновляется из нескольких мест (TradeEngine, PositionManager, REST sync) без синхронизации. Возможны race conditions.
+
+**Решение:**
+Добавлен thread-safe метод `Position.close_safe()` с Lock:
+
+```python
+# В Position dataclass:
+_lock: Lock = field(default_factory=Lock, repr=False, compare=False)
+
+def close_safe(
+    self,
+    exit_reason: str,
+    exit_price: float = 0.0,
+    realized_pnl: float = 0.0,
+) -> bool:
+    """Thread-safe закрытие позиции. Returns True если закрыто этим вызовом."""
+    with self._lock:
+        if self.status == PositionStatus.CLOSED:
+            return False  # Уже закрыта
+        self.status = PositionStatus.CLOSED
+        self.exit_reason = exit_reason
+        self.exit_price = exit_price
+        self.realized_pnl = realized_pnl
+        self.closed_at = datetime.now(timezone.utc)
+        return True
+```
+
+Все места изменения status заменены на `close_safe()`:
+- `trade_engine.py:close_position()`
+- `position_manager.py`: 6 методов
+
+**Файлы изменены:**
+- `core/models.py`: Добавлен Lock и метод `close_safe()`
+- `engine/trade_engine.py`: Использует `close_safe()`
+- `engine/position_manager.py`: Использует `close_safe()` везде
+
+### Проблема 2: Нет Circuit Breaker
+
+**Проблема:** Критические ошибки (AUTH_ERROR, IP_BAN) полагаются на callback, но если что-то зависнет - бот не остановится.
+
+**Решение:**
+Создан класс `CircuitBreaker` в `engine/circuit_breaker.py`:
+
+```python
+class CircuitBreaker:
+    # Состояния: CLOSED (работа), OPEN (остановлен), HALF_OPEN (тест)
+
+    def record_error(error_type, message, severity) -> bool:
+        # При критических ошибках (AUTH_ERROR, IP_BAN) - мгновенное открытие
+        # При обычных - после N ошибок за окно
+
+    def record_success():
+        # В HALF_OPEN -> переход в CLOSED
+```
+
+Интеграция в TradeApp:
+- `_main_loop`: проверка `circuit_breaker.is_open` перед каждым циклом
+- `_on_critical_error`: регистрация критических ошибок
+- `_on_ip_ban`: регистрация IP ban
+- `_on_circuit_open`: Telegram уведомление
+
+**Файлы созданы:**
+- `engine/circuit_breaker.py`
+
+**Файлы изменены:**
+- `trade_app.py`: Интеграция CircuitBreaker
+
+### Проблема 3: Orphan позиции при crash
+
+**Проблема:** Позиция на бирже, но не в state. Восстановление неполное.
+
+**Анализ:** StateManager уже реализует полную синхронизацию при startup:
+1. Загружает сохранённые позиции
+2. Получает все позиции с биржи
+3. Сопоставляет и восстанавливает
+4. Находит SL/TP ордера
+5. Создаёт недостающие защитные ордера
+
+Улучшение уже было сделано в предыдущих сессиях (FIX #6, FIX #8).
+
+### Проблема 4: Нет Health Check
+
+**Проблема:** Невозможно понять жив ли бот изнутри.
+
+**Решение:**
+Создан класс `HealthChecker` в `engine/health_checker.py`:
+
+```python
+class HealthChecker:
+    # Периодический heartbeat файл (JSON)
+    # Статистика: uptime, cycles, errors, ws_connected
+
+    def record_cycle_completed()
+    def record_error()
+    def get_health() -> HealthStatus
+
+# Внешняя функция для мониторинга:
+def check_bot_health(heartbeat_file) -> dict
+```
+
+Интеграция в TradeApp:
+- Запуск в `start()`
+- Остановка в `stop()`
+- `record_cycle_completed()` после каждого цикла
+- `record_error()` при ошибках
+- `get_health()` для программного доступа к статусу
+
+**Файлы созданы:**
+- `engine/health_checker.py`
+
+**Файлы изменены:**
+- `trade_app.py`: Интеграция HealthChecker
+
+### Тесты
+
+Добавлены 14 новых тестов:
+- `TestThreadSafePositionClose`: 3 теста
+- `TestCircuitBreaker`: 5 тестов
+- `TestHealthChecker`: 6 тестов
+
+### Результаты тестов
+
+```bash
+python -m pytest tradebot/tests/ -v
+# 284 passed in 16.74s
+```
+
+Все 284 теста проходят успешно.
+
+---
+
+## 2026-03-09: Исправление проблем из детального аудита
+
+### Задача
+
+Исправить все проблемы из детального списка проблем:
+1. REST sync phantom close
+2. round_quantity без exchange_info
+3. _close_position_sync_fix использует текущую цену
+4. Нет валидации callback_rate при загрузке
+5. int(order_id) без защиты
+6. asyncio.create_task без exception handler
+7. WebSocket connect без timeout
+
+### Аудит
+
+Проведён полный аудит всех 12+ проблем из списка. Результаты:
+
+**НЕ ПРОБЛЕМЫ (код уже правильный):**
+- Problem 1: `get_executed_signal_ids()` - СУЩЕСТВУЕТ (trade_engine.py:918)
+- Problem 2: WebSocket reconnect - `_ws_task` ПЕРЕЗАПУСКАЕТСЯ (binance.py:1558)
+- Problem 9: PARTIALLY_FILLED - детально обработан (position_manager.py:283-358)
+
+### Исправления
+
+#### FIX: REST sync phantom close (Problem 3)
+
+**Файл:** `engine/position_manager.py`
+
+**Проблема:** При временном "not found" REST sync сразу помечал позицию как закрытую.
+
+**Решение:** Добавлена retry логика:
+1. Если позиция не найдена - помечается как "suspicious"
+2. Ждём 3 секунды
+3. Повторно запрашиваем данные с биржи
+4. Только после повторного подтверждения - закрываем позицию
+
+```python
+# Suspicious positions - требуют retry проверки
+suspicious_positions = []
+# ... проверки ...
+if suspicious_positions:
+    await asyncio.sleep(3)  # Retry check
+    # ... повторная проверка ...
+```
+
+#### FIX: round_quantity без exchange_info (Problem 7)
+
+**Файл:** `adapters/binance.py`
+
+**Проблема:** Если symbol_info не загружен, методы `round_quantity()`, `get_step_size()`, `get_tick_size()`, `round_price()` возвращали fallback без предупреждения.
+
+**Решение:**
+1. Добавлены warnings при отсутствии symbol_info
+2. Добавлены свойства `is_connected` и `is_exchange_info_loaded`
+
+```python
+def round_quantity(self, symbol: str, quantity: Decimal) -> Decimal:
+    info = self._symbol_info.get(symbol)
+    if not info:
+        logger.warning(
+            f"round_quantity({symbol}): symbol_info not loaded..."
+        )
+        return quantity
+```
+
+#### FIX: _close_position_sync_fix exit price (Problem 5)
+
+**Файлы:** `adapters/binance.py`, `engine/position_manager.py`
+
+**Проблема:** Использовалась текущая рыночная цена вместо реальной цены закрытия.
+
+**Решение:**
+1. Добавлены методы `get_order_details()` и `get_algo_order_details()` в binance.py
+2. `_close_position_sync_fix()` теперь пытается получить реальную цену из истории ордеров:
+   - Проверяет SL ордер (Algo API)
+   - Проверяет TP ордер (REST API)
+   - Проверяет Trailing Stop (Algo API)
+   - Fallback на текущую цену если ордера не найдены
+
+```python
+# 1. Проверяем SL ордер (Algo Order)
+if position.sl_order_id:
+    sl_details = await self.exchange.get_algo_order_details(...)
+    if sl_details and sl_details.get("algoStatus") == "FILLED":
+        exit_price = float(sl_details.get("avgPrice", 0))
+```
+
+#### FIX: callback_rate config validation (Problem 6)
+
+**Файл:** `trade_app.py`
+
+**Проблема:** Валидация callback_rate только при размещении ордера, не при загрузке конфига.
+
+**Решение:**
+1. Валидация в `load_trailing_stop_config()` при загрузке файла
+2. Валидация в `__init__` при программном создании TradeApp
+
+```python
+# В load_trailing_stop_config():
+if callback_rate < 0.1 or callback_rate > 10.0:
+    print(f"Warning: callback_rate={callback_rate} is invalid...")
+    callback_rate = defaults["callback_rate"]
+
+# В __init__:
+if trailing_stop_callback_rate < 0.1 or trailing_stop_callback_rate > 10.0:
+    raise ValueError(...)
+```
+
+#### FIX: int(order_id) safety (Problem 8)
+
+**Файлы:** `engine/position_manager.py`, `engine/trade_engine.py`, `engine/state_manager.py`
+
+**Проблема:** `int(order_id)` мог упасть на пустых или нечисловых значениях.
+
+**Решение:** Добавлена функция `_safe_int_order_id()` во все три файла:
+
+```python
+def _safe_int_order_id(order_id: str) -> Optional[int]:
+    if not order_id or not order_id.strip():
+        return None
+    try:
+        return int(order_id)
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid order_id format: '{order_id}'")
+        return None
+```
+
+Все вызовы `int(order_id)` заменены на безопасную версию с проверкой результата.
+
+#### FIX: asyncio.create_task exception handler (Problem 10)
+
+**Файлы:** `engine/position_manager.py`, `adapters/binance.py`
+
+**Проблема:** `asyncio.create_task()` без exception handling - ошибки терялись.
+
+**Решение:** Добавлены helper методы с done_callback:
+
+```python
+def _create_task_with_handler(self, coro, name: str = "") -> asyncio.Task:
+    task = asyncio.create_task(coro, name=name)
+    task.add_done_callback(self._handle_task_exception)
+    return task
+
+def _handle_task_exception(self, task: asyncio.Task) -> None:
+    try:
+        exc = task.exception()
+        if exc:
+            logger.error(f"Background task '{task.get_name()}' failed: {exc}")
+    except asyncio.CancelledError:
+        pass
+```
+
+Все create_task вызовы заменены на `_create_task_with_handler()`.
+
+#### FIX: WebSocket connect timeout (Problem 12)
+
+**Файл:** `adapters/binance.py`
+
+**Проблема:** `websockets.connect()` без timeout мог зависнуть.
+
+**Решение:** Добавлены параметры timeout:
+
+```python
+self._ws = await websockets.connect(
+    ws_url,
+    ping_interval=30,
+    ping_timeout=20,
+    open_timeout=30,   # Timeout для установки соединения
+    close_timeout=10,  # Timeout для закрытия соединения
+)
+```
+
+### Файлы изменены
+
+- `engine/position_manager.py`:
+  - REST sync retry logic
+  - `_safe_int_order_id()` helper
+  - `_create_task_with_handler()` helper
+  - `_close_position_sync_fix()` с получением реальной цены
+
+- `engine/trade_engine.py`:
+  - `_safe_int_order_id()` helper
+  - Безопасное преобразование order_id
+
+- `engine/state_manager.py`:
+  - `_safe_int_order_id()` helper
+  - Безопасное преобразование order_id
+
+- `adapters/binance.py`:
+  - `get_order_details()` - новый метод
+  - `get_algo_order_details()` - новый метод
+  - `is_connected` property
+  - `is_exchange_info_loaded` property
+  - Warnings для round_quantity/get_step_size/etc.
+  - `_create_task_with_handler()` helper
+  - WebSocket connect timeout
+
+- `trade_app.py`:
+  - Валидация callback_rate в `load_trailing_stop_config()`
+  - Валидация callback_rate в `__init__`
+
+### Результат
+
+Все 7 реальных проблем исправлены. Синтаксис проверен - ошибок нет.
+
+---
+
+## [2026-03-09] SESSION: Regime Filter Implementation
+
+### Задача
+
+Внедрить динамический regime filter для автоматического переключения между:
+- **BTC_ONLY**: торгуем только BTCUSDT
+- **ALT_ONLY**: торгуем только альты (без BTC)
+- **MIXED**: торгуем всё
+
+### Логика (от коллеги)
+
+```
+BTC_ONLY: rolling_corr_30d > 0.8 ИЛИ dominance_change_7d > +2%
+ALT_ONLY: rolling_corr_30d < 0.6 И dominance_change_7d < -1%
+MIXED: всё остальное
+```
+
+### Данные
+
+- **Rolling correlation 30d**: рассчитывается из klines BTCUSDT vs каждый альт
+- **Dominance change 7d**: рассчитывается из klines BTCDOMUSDT
+
+Оба источника - Binance Futures API (`/fapi/v1/klines`).
+
+### Созданные файлы
+
+1. **`tradebot/engine/regime_filter.py`** (НОВЫЙ)
+   - Класс `RegimeFilter`
+   - `filter_symbols_backtest()` - для бэктеста (по дате сигнала)
+   - `filter_symbols_live()` - для лайва (кэширование на день)
+   - Расчёт корреляции через log returns + numpy.corrcoef
+   - HTTP запросы к Binance API для live режима
+
+### Изменённые файлы
+
+2. **`tradebot/engine/__init__.py`**
+   - Добавлен экспорт `RegimeFilter`
+
+3. **`tradebot/trade_app.py`**
+   - Добавлен импорт `RegimeFilter`
+   - Добавлен параметр `regime_filter_enabled: bool = False`
+   - Добавлен аргумент CLI `--regime-filter`
+   - В `_run_cycle()`: вызов `filter_symbols_live()` перед генерацией сигналов
+   - Логирование: `[REGIME] BTC_ONLY | Corr=0.91 | DomChange=+0.55%`
+
+4. **`GenerateHistorySignals/run_all.py`**
+   - Добавлен импорт `RegimeFilter` (с sys.path для tradebot)
+   - Добавлен параметр `regime_filter_enabled: bool = False`
+   - Добавлен аргумент CLI `--regime-filter`
+   - Автоматическое добавление BTCDOMUSDT в symbols для скачивания
+   - Фильтрация сигналов по режиму на дату каждого сигнала
+   - Вывод `skipped_regime_filter` в Skip Summary
+
+### Использование
+
+**Бэктест:**
+```bash
+python run_all.py --start 2024-01-01 --end 2025-01-31 --symbols BTCUSDT,ETHUSDT,SOLUSDT --regime-filter
+```
+
+**Лайв:**
+```bash
+py -3.12 -m tradebot.trade_app --mainnet --symbols BTCUSDT,ETHUSDT,SOLUSDT --regime-filter
+```
+
+### Тест
+
+```
+RegimeFilter initialized: OK
+Regime: BTC_ONLY
+Correlation: 0.911
+Dominance change: +0.55%
+Symbols: 3 -> 1
+Filtered symbols: ['BTCUSDT']
+```
+
+### Результат
+
+Regime filter внедрён. Флаг `--regime-filter` добавлен в оба режима (бэктест и лайв).
+При текущих рыночных условиях (correlation 0.911 > 0.8) режим = BTC_ONLY.
+
+---

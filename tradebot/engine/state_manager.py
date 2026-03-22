@@ -17,7 +17,7 @@ State Manager - Сохранение и восстановление состо�
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Optional, Dict, Any, List, TYPE_CHECKING
 
@@ -38,6 +38,21 @@ logger = logging.getLogger(__name__)
 
 # Путь к файлу состояния по умолчанию
 DEFAULT_STATE_FILE = "tradebot_state.json"
+
+
+def _safe_int_order_id(order_id: str) -> Optional[int]:
+    """
+    Безопасно преобразовать order_id/algo_id в int.
+
+    FIX: Защита от ValueError при нечисловых или пустых значениях.
+    """
+    if not order_id or not order_id.strip():
+        return None
+    try:
+        return int(order_id)
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid order_id format: '{order_id}' (expected numeric string)")
+        return None
 
 
 class StateManager:
@@ -106,7 +121,7 @@ class StateManager:
         """
         try:
             state = {
-                "saved_at": datetime.utcnow().isoformat(),
+                "saved_at": datetime.now(timezone.utc).isoformat(),
                 "version": "1.1",
 
                 # Позиции
@@ -380,7 +395,13 @@ class StateManager:
             regime_action = matched_saved.get("regime_action", "FULL")
             max_hold_days = matched_saved.get("max_hold_days", self.trade_engine.max_hold_days)
             opened_at_str = matched_saved.get("opened_at")
-            opened_at = datetime.fromisoformat(opened_at_str) if opened_at_str else datetime.utcnow()
+            if opened_at_str:
+                opened_at = datetime.fromisoformat(opened_at_str)
+                # FIX: Ensure timezone-aware (old state files may have naive datetime)
+                if opened_at.tzinfo is None:
+                    opened_at = opened_at.replace(tzinfo=timezone.utc)
+            else:
+                opened_at = datetime.now(timezone.utc)
             sl_price = matched_saved.get("stop_loss", 0)
             tp_price = matched_saved.get("take_profit", 0)
         else:
@@ -391,7 +412,7 @@ class StateManager:
             strategy = "SYNCED"
             regime_action = "FULL"
             max_hold_days = self.trade_engine.max_hold_days
-            opened_at = datetime.utcnow()  # Не знаем когда открылась
+            opened_at = datetime.now(timezone.utc)  # Не знаем когда открылась
             sl_price = 0
             tp_price = 0
 
@@ -436,8 +457,7 @@ class StateManager:
             trailing_stop_activation_price = float(activate_price) if activate_price else 0.0
 
         # Проверяем max_hold_days - если истёк, закрываем
-        from datetime import timedelta
-        if (datetime.utcnow() - opened_at) >= timedelta(days=max_hold_days):
+        if (datetime.now(timezone.utc) - opened_at) >= timedelta(days=max_hold_days):
             logger.warning(
                 f"Position {position_id} EXPIRED: held > {max_hold_days} days - CLOSING"
             )
@@ -814,11 +834,14 @@ class StateManager:
         """
         # Отменяем SL (Algo Order) если есть
         if sl_order_id:
-            try:
-                # SL - это Algo Order, нужно cancel_algo_order
-                await self.exchange.cancel_algo_order(symbol, algo_id=int(sl_order_id))
-            except Exception as e:
-                logger.warning(f"Failed to cancel SL algo order {sl_order_id}: {e}")
+            # FIX: Безопасное преобразование order_id в int
+            sl_algo_id = _safe_int_order_id(sl_order_id)
+            if sl_algo_id is not None:
+                try:
+                    # SL - это Algo Order, нужно cancel_algo_order
+                    await self.exchange.cancel_algo_order(symbol, algo_id=sl_algo_id)
+                except Exception as e:
+                    logger.warning(f"Failed to cancel SL algo order {sl_order_id}: {e}")
 
         # Отменяем TP (LIMIT Order) если есть
         if tp_order_id:
@@ -888,13 +911,18 @@ class StateManager:
         """
         try:
             # Парсим даты
+            # FIX: Ensure timezone-aware (old state files may have naive datetime)
             opened_at = None
             if data.get("opened_at"):
                 opened_at = datetime.fromisoformat(data["opened_at"])
+                if opened_at.tzinfo is None:
+                    opened_at = opened_at.replace(tzinfo=timezone.utc)
 
             closed_at = None
             if data.get("closed_at"):
                 closed_at = datetime.fromisoformat(data["closed_at"])
+                if closed_at.tzinfo is None:
+                    closed_at = closed_at.replace(tzinfo=timezone.utc)
 
             # Парсим enum'ы
             side = PositionSide(data.get("side", "LONG"))

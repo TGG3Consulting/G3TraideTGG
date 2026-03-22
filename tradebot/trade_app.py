@@ -27,6 +27,7 @@ import logging.handlers
 import os
 import signal
 import sys
+import threading
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
@@ -43,9 +44,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'GenerateHistor
 from hybrid_downloader import HybridHistoryDownloader
 from strategies import StrategyConfig
 from strategy_runner import StrategyRunner
+from config import AppConfig
 
 # Импорт из tradebot
-from .engine import TradeEngine, PositionManager, StateManager, MetricsTracker
+from .engine import TradeEngine, PositionManager, StateManager, MetricsTracker, RegimeFilter
+from .engine.circuit_breaker import CircuitBreaker, ErrorSeverity
+from .engine.health_checker import HealthChecker
 from .adapters import BinanceFuturesAdapter
 from .core.models import Position
 
@@ -75,6 +79,7 @@ CONFIG_DIR = Path(__file__).parent.parent / "config"
 BINANCE_API_CONFIG = CONFIG_DIR / "binance_api.json"
 TRAILING_STOP_CONFIG = CONFIG_DIR / "trailing_stop.json"
 TELEGRAM_CONFIG = CONFIG_DIR / "telegram.json"
+DYNAMIC_SIZE_STATE_FILE = CONFIG_DIR / "dynamic_size_state.json"
 
 
 def load_binance_api_config(testnet: bool = False) -> Tuple[str, str]:
@@ -133,9 +138,18 @@ def load_trailing_stop_config() -> Dict[str, Any]:
         with open(TRAILING_STOP_CONFIG, "r", encoding="utf-8") as f:
             config = json.load(f)
 
+        # FIX: Валидация callback_rate при загрузке конфига
+        callback_rate = config.get("callback_rate", defaults["callback_rate"])
+        if not isinstance(callback_rate, (int, float)) or callback_rate < 0.1 or callback_rate > 10.0:
+            print(
+                f"Warning: callback_rate={callback_rate} is invalid (must be 0.1-10.0), "
+                f"using default {defaults['callback_rate']}"
+            )
+            callback_rate = defaults["callback_rate"]
+
         return {
             "enabled": config.get("enabled", defaults["enabled"]),
-            "callback_rate": config.get("callback_rate", defaults["callback_rate"]),
+            "callback_rate": callback_rate,
             "activation_price_pct": config.get("activation_price_pct", defaults["activation_price_pct"]),
             "use_instead_of_tp": config.get("use_instead_of_tp", defaults["use_instead_of_tp"]),
         }
@@ -167,6 +181,52 @@ def load_telegram_config() -> Tuple[str, str]:
     except Exception as e:
         print(f"Warning: Failed to load telegram.json: {e}")
         return "", ""
+
+
+def load_dynamic_size_state() -> bool:
+    """
+    Загрузить состояние dynamic size из файла.
+
+    Returns:
+        True если последняя сделка была WIN, False если LOSS
+    """
+    if not DYNAMIC_SIZE_STATE_FILE.exists():
+        return True  # Default: начинаем с normal size
+
+    try:
+        with open(DYNAMIC_SIZE_STATE_FILE, "r", encoding="utf-8") as f:
+            state = json.load(f)
+
+        last_was_win = state.get("last_was_win", True)
+        print(f"Dynamic size state loaded: last_was_win={last_was_win}")
+        return last_was_win
+
+    except Exception as e:
+        print(f"Warning: Failed to load dynamic_size_state.json: {e}")
+        return True  # Default: normal size
+
+
+def save_dynamic_size_state(last_was_win: bool) -> None:
+    """
+    Сохранить состояние dynamic size в файл.
+
+    Args:
+        last_was_win: True если последняя сделка была WIN
+    """
+    try:
+        # Создаём директорию если не существует
+        DYNAMIC_SIZE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+        state = {
+            "last_was_win": last_was_win,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        with open(DYNAMIC_SIZE_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+
+    except Exception as e:
+        print(f"Warning: Failed to save dynamic_size_state.json: {e}")
 
 
 def setup_logging(
@@ -270,7 +330,7 @@ class TradeApp:
         position_mode: str = "single",
         # === DYNAMIC SIZING ===
         dynamic_size_enabled: bool = False,
-        protected_size: float = 100.0,  # Size after LOSS (normal size = order_size_usd)
+        protected_size: float = 10.0,  # Divisor after LOSS (loss_size = order_size_usd / divisor)
         # === MONTH/DAY FILTERS (STATIC from MONTH_DATA/DAY_DATA) ===
         month_off_dd: Optional[float] = None,
         month_off_pnl: Optional[float] = None,
@@ -293,6 +353,8 @@ class TradeApp:
         trailing_stop_use_instead_of_tp: bool = True,
         # === LATE SIGNAL PROTECTION ===
         late_signal_skip_after_utc: Optional[int] = 3,  # Skip signals for today if past this hour UTC
+        # === REGIME FILTER (BTC/ALT dynamic switching) ===
+        regime_filter_enabled: bool = False,
     ):
         """
         Инициализация TradeApp.
@@ -319,7 +381,7 @@ class TradeApp:
             dedup_days: Дедупликация сигналов (default 3 дня)
             position_mode: single/direction/multi (default single)
             dynamic_size_enabled: Включить динамический размер позиции
-            protected_size: Размер после LOSS (default $100, после WIN = order_size_usd)
+            protected_size: Делитель после LOSS (loss_size = order_size_usd / divisor, default 10)
             month_off_dd: Skip месяцы где MaxDD > X% (lookup из MONTH_DATA)
             month_off_pnl: Skip месяцы где PnL < X% (lookup из MONTH_DATA)
             day_off_dd: Skip дни где MaxDD > X% (lookup из DAY_DATA)
@@ -336,6 +398,7 @@ class TradeApp:
             trailing_stop_activation_pct: Активация при X% профита (None = сразу)
             trailing_stop_use_instead_of_tp: True = заменить TP, False = в дополнение
             late_signal_skip_after_utc: Skip сигналы за текущий день если время > X:00 UTC (default 3, None = выключено)
+            regime_filter_enabled: Включить regime filter (BTC_ONLY/ALT_ONLY/MIXED по корреляции и dominance)
         """
         self.testnet = testnet
         self.symbols = symbols
@@ -360,8 +423,13 @@ class TradeApp:
 
         # === DYNAMIC SIZING ===
         self.dynamic_size_enabled = dynamic_size_enabled
-        self.protected_size = protected_size  # После LOSS, после WIN = order_size_usd
-        self._last_trade_was_win: bool = True  # Для dynamic sizing (начинаем с normal)
+        self.protected_size = protected_size  # Делитель: loss_size = order_size_usd / divisor
+        self._dynamic_size_lock = threading.Lock()  # FIX: Race condition protection
+        # Загружаем состояние из файла (персистенция как в GEN SETUP)
+        if dynamic_size_enabled:
+            self._last_trade_was_win = load_dynamic_size_state()
+        else:
+            self._last_trade_was_win = True
 
         # === MONTH/DAY FILTERS ===
         self.month_off_dd = month_off_dd
@@ -378,12 +446,22 @@ class TradeApp:
 
         # === TRAILING STOP ===
         self.trailing_stop_enabled = trailing_stop_enabled
+        # FIX: Валидация callback_rate при инициализации
+        if trailing_stop_callback_rate < 0.1 or trailing_stop_callback_rate > 10.0:
+            raise ValueError(
+                f"trailing_stop_callback_rate must be between 0.1 and 10.0, "
+                f"got {trailing_stop_callback_rate}"
+            )
         self.trailing_stop_callback_rate = trailing_stop_callback_rate
         self.trailing_stop_activation_pct = trailing_stop_activation_pct
         self.trailing_stop_use_instead_of_tp = trailing_stop_use_instead_of_tp
 
         # === LATE SIGNAL PROTECTION ===
         self.late_signal_skip_after_utc = late_signal_skip_after_utc
+
+        # === REGIME FILTER ===
+        self.regime_filter_enabled = regime_filter_enabled
+        self.regime_filter = RegimeFilter(enabled=regime_filter_enabled)
 
         # === RISK MANAGEMENT ===
         self.daily_max_dd = daily_max_dd
@@ -416,6 +494,9 @@ class TradeApp:
             trailing_stop_callback_rate=trailing_stop_callback_rate,
             trailing_stop_activation_pct=trailing_stop_activation_pct,
             trailing_stop_use_instead_of_tp=trailing_stop_use_instead_of_tp,
+            # SL/TP (расчёт от реального entry)
+            sl_pct=self.sl_pct,
+            tp_pct=self.tp_pct,
         )
 
         # Position Manager (мониторинг SL/TP через WebSocket)
@@ -431,10 +512,14 @@ class TradeApp:
         self.exchange.on_critical_error = self._on_critical_error
         self.exchange.on_ip_ban = self._on_ip_ban
 
+        # FIX #8: Callback для REST sync после WebSocket reconnect
+        self.exchange.on_ws_reconnected = self._on_ws_reconnected
+
         # Data downloader
         self.downloader = HybridHistoryDownloader(
             cache_dir='cache',
             data_interval='daily',
+            coinalyze_api_key=AppConfig().coinalyze_api_key,
         )
 
         # Metrics Tracker (PnL, статистика)
@@ -447,6 +532,27 @@ class TradeApp:
             position_manager=self.position_manager,
             exchange=self.exchange,
             metrics_tracker=self.metrics,
+        )
+
+        # FIX #6: Подключаем callback для немедленного сохранения состояния
+        # Вызывается сразу после добавления позиции в positions dict
+        # Защита от crash между execute_signal и periodic save
+        self.trade_engine.on_state_changed = self._on_state_changed
+
+        # Circuit Breaker - автоматическая остановка при критических ошибках
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=5,      # 5 обычных ошибок за минуту
+            critical_threshold=1,     # 1 критическая ошибка = stop
+            cooldown_seconds=300,     # 5 минут cooldown
+            error_window_seconds=60,  # Окно 60 секунд
+            on_circuit_open=self._on_circuit_open,
+        )
+
+        # Health Checker - мониторинг состояния бота
+        self.health_checker = HealthChecker(
+            heartbeat_file="tradebot_heartbeat.json",
+            heartbeat_interval=30,
+            max_cycle_age=self.interval_sec * 3,  # 3 цикла без обновления = проблема
         )
 
         # Telegram session
@@ -492,7 +598,7 @@ class TradeApp:
             day_filter_parts.append(f"PnL<{self.day_off_pnl}%")
         logger.info(f"Day OFF:     {' '.join(day_filter_parts) if day_filter_parts else 'Disabled'}")
         if self.dynamic_size_enabled:
-            logger.info(f"Dynamic Size: ENABLED (normal=${self.order_size_usd}, protected=${self.protected_size})")
+            logger.info(f"Dynamic Size: ENABLED (normal=${self.order_size_usd}, after_loss=${self.order_size_usd / self.protected_size:.0f} [divisor={self.protected_size}])")
         else:
             logger.info(f"Dynamic Size: Disabled")
         # ML Filter
@@ -577,6 +683,11 @@ class TradeApp:
         logger.info(f"Symbols:     {len(symbols)}: {', '.join(symbols[:5])}{'...' if len(symbols) > 5 else ''}")
         logger.info("=" * 60)
 
+        # FIX #10: Устанавливаем _running = True ДО запуска любых background tasks
+        # Иначе они сразу выйдут из while self._running
+        # КРИТИЧНО: _keyboard_listener и _state_save_loop используют while self._running
+        self._running = True
+
         # Запускаем Position Manager (WebSocket мониторинг SL/TP)
         self.position_manager.on_position_closed = self._on_position_closed
         self.position_manager.on_warning = self._on_position_warning
@@ -594,13 +705,18 @@ class TradeApp:
             logger.warning(f"Keyboard listener: FAILED ({e})")
             self._keyboard_listener_task = None
 
-        # ВАЖНО: Устанавливаем _running = True ДО создания background tasks
-        # Иначе они сразу выйдут из while self._running
-        self._running = True
-
         # Запускаем периодическое сохранение состояния (защита от crash)
         self._state_save_task = asyncio.create_task(self._state_save_loop())
         logger.info(f"State save loop: STARTED (every {self._state_save_interval // 60} min)")
+
+        # Запускаем Health Checker
+        self.health_checker.set_callbacks(
+            get_positions_count=lambda: len(self.trade_engine.get_open_positions()),
+            get_circuit_state=lambda: self.circuit_breaker.state.value,
+            get_ws_connected=lambda: self.exchange._ws_running if hasattr(self.exchange, '_ws_running') else False,
+        )
+        self.health_checker.start()
+        logger.info("Health Checker: STARTED")
 
         # Отправляем стартовое сообщение в Telegram
         late_signal_info = f"Late Signal Skip: after {self.late_signal_skip_after_utc}:00 UTC" if self.late_signal_skip_after_utc is not None else "Late Signal Skip: OFF"
@@ -657,6 +773,10 @@ class TradeApp:
                 pass
             logger.info("State save loop stopped")
 
+        # Останавливаем Health Checker
+        await self.health_checker.stop()
+        logger.info("Health Checker stopped")
+
         # Останавливаем Position Manager
         await self.position_manager.stop()
 
@@ -700,6 +820,25 @@ class TradeApp:
         logger.info("TRADEAPP STOPPED")
         logger.info("=" * 60)
 
+    def _create_background_task(self, coro, name: str = "") -> asyncio.Task:
+        """
+        Create background task with exception handling.
+
+        FIX: Loose asyncio.create_task - exceptions are now logged instead of lost.
+        """
+        task = asyncio.create_task(coro, name=name)
+        task.add_done_callback(self._handle_task_exception)
+        return task
+
+    def _handle_task_exception(self, task: asyncio.Task) -> None:
+        """Handle exceptions from background tasks."""
+        try:
+            exc = task.exception()
+            if exc:
+                logger.error(f"Background task '{task.get_name()}' failed: {exc}")
+        except asyncio.CancelledError:
+            pass  # Task was cancelled, not an error
+
     def _on_position_closed(
         self,
         position: Position,
@@ -717,10 +856,12 @@ class TradeApp:
         # Записываем в MetricsTracker
         self.metrics.record_trade(position, exit_reason, realized_pnl)
 
-        # Обновляем флаг для dynamic sizing
+        # Обновляем флаг для dynamic sizing (с персистенцией как в GEN SETUP)
         if self.dynamic_size_enabled:
-            self._last_trade_was_win = (realized_pnl >= 0)
-            logger.debug(f"Dynamic size: last_trade_was_win={self._last_trade_was_win}")
+            with self._dynamic_size_lock:
+                self._last_trade_was_win = (realized_pnl >= 0)
+            save_dynamic_size_state(self._last_trade_was_win)
+            logger.info(f"Dynamic size: last_was_win={self._last_trade_was_win}, saved to file")
 
         # Обновляем daily/monthly PnL для risk management
         now = datetime.now(timezone.utc)
@@ -750,8 +891,10 @@ class TradeApp:
             # Отправляем Telegram алерт
             if not self._daily_alert_sent:
                 self._daily_alert_sent = True
-                import asyncio
-                asyncio.create_task(self._send_risk_alert("DAILY", self._current_day_pnl, self.daily_max_dd))
+                self._create_background_task(
+                    self._send_risk_alert("DAILY", self._current_day_pnl, self.daily_max_dd),
+                    name="daily_risk_alert"
+                )
 
         # Проверяем MONTHLY лимит
         if not self._monthly_stopped and self._current_month_pnl <= -self.monthly_max_dd:
@@ -761,14 +904,16 @@ class TradeApp:
             # Отправляем Telegram алерт
             if not self._monthly_alert_sent:
                 self._monthly_alert_sent = True
-                import asyncio
-                asyncio.create_task(self._send_risk_alert("MONTHLY", self._current_month_pnl, self.monthly_max_dd))
+                self._create_background_task(
+                    self._send_risk_alert("MONTHLY", self._current_month_pnl, self.monthly_max_dd),
+                    name="monthly_risk_alert"
+                )
 
         # Отправляем уведомление в Telegram (асинхронно)
-        import asyncio
-        asyncio.create_task(self._send_position_closed_alert(
-            position, exit_reason, realized_pnl
-        ))
+        self._create_background_task(
+            self._send_position_closed_alert(position, exit_reason, realized_pnl),
+            name="position_closed_alert"
+        )
 
     async def _send_position_closed_alert(
         self,
@@ -999,6 +1144,20 @@ class TradeApp:
             self._daily_alert_sent = False
             self._last_day = current_day
 
+    def _on_state_changed(self) -> None:
+        """
+        FIX #6: Callback для немедленного сохранения состояния.
+
+        Вызывается TradeEngine сразу после добавления позиции в positions dict.
+        Защита от crash - если crash после execute_signal, позиция будет в state file.
+        """
+        try:
+            self.state_manager.save_state()
+            logger.debug("State saved immediately after position opened")
+        except Exception as e:
+            logger.error(f"Immediate state save failed: {e}")
+            # Не прерываем работу - periodic save подберёт позже
+
     def _on_alert(
         self,
         level: str,
@@ -1040,11 +1199,19 @@ class TradeApp:
         """
         Callback для критических ошибок (Auth, Liquidation).
 
-        Останавливает бота.
+        Останавливает бота через Circuit Breaker.
         """
         import asyncio
 
         logger.critical(f"CRITICAL ERROR CALLBACK: [{error.code}] {error.message}")
+
+        # Записываем в Circuit Breaker (критическая ошибка = мгновенное открытие)
+        error_type = error.code if hasattr(error, 'code') else "CRITICAL_ERROR"
+        self.circuit_breaker.record_error(
+            error_type=error_type,
+            message=str(error.message) if hasattr(error, 'message') else str(error),
+            severity=ErrorSeverity.CRITICAL,
+        )
 
         # Отправляем CRITICAL alert
         tg_message = (
@@ -1062,6 +1229,27 @@ class TradeApp:
         # Останавливаем бота
         self._running = False
 
+    def _on_circuit_open(self, reason: str) -> None:
+        """
+        Callback когда Circuit Breaker открывается.
+
+        Отправляет уведомление в Telegram.
+        """
+        import asyncio
+
+        logger.critical(f"CIRCUIT BREAKER OPENED: {reason}")
+
+        tg_message = (
+            f"🛑 <b>CIRCUIT BREAKER OPENED</b>\n"
+            f"\n"
+            f"<b>Reason:</b> {reason}\n"
+            f"\n"
+            f"Trading paused automatically due to critical errors.\n"
+            f"Cooldown: 5 minutes."
+        )
+
+        asyncio.create_task(self._send_telegram(tg_message))
+
     def _on_ip_ban(self, retry_after: int) -> None:
         """
         Callback для IP бана.
@@ -1073,6 +1261,13 @@ class TradeApp:
 
         logger.warning(f"IP BAN CALLBACK: retry after {retry_after}s")
 
+        # Записываем в Circuit Breaker как критическую ошибку
+        self.circuit_breaker.record_error(
+            error_type="IP_BAN",
+            message=f"IP banned for {retry_after}s",
+            severity=ErrorSeverity.CRITICAL,
+        )
+
         tg_message = (
             f"⛔ <b>IP BANNED</b>\n"
             f"\n"
@@ -1082,6 +1277,56 @@ class TradeApp:
         )
 
         asyncio.create_task(self._send_telegram(tg_message))
+
+    def get_health(self) -> dict:
+        """
+        Получить статус здоровья бота.
+
+        Returns:
+            Dict со всей информацией о состоянии
+        """
+        health = self.health_checker.get_health()
+        return {
+            "is_healthy": health.is_healthy,
+            "timestamp": health.timestamp.isoformat(),
+            "uptime_seconds": health.uptime_seconds,
+            "cycles_completed": health.cycles_completed,
+            "websocket_connected": health.websocket_connected,
+            "open_positions_count": health.open_positions_count,
+            "errors_last_hour": health.errors_last_hour,
+            "circuit_breaker": self.circuit_breaker.get_stats(),
+            "running": self._running,
+        }
+
+    async def _on_ws_reconnected(self) -> None:
+        """
+        FIX #8: Callback для WebSocket reconnect.
+
+        Запускает REST sync чтобы восстановить пропущенные события
+        во время disconnect.
+        """
+        logger.info("WebSocket reconnected - triggering REST sync to recover missed events")
+
+        try:
+            # Запускаем REST sync через PositionManager
+            await self.position_manager._perform_rest_sync()
+            logger.info("REST sync after reconnect completed")
+
+            # Отправляем уведомление
+            await self._send_telegram(
+                f"🔄 <b>WebSocket Reconnected</b>\n"
+                f"\n"
+                f"Connection restored. REST sync completed.\n"
+                f"Open positions: {len(self.trade_engine.get_open_positions())}"
+            )
+        except Exception as e:
+            logger.error(f"REST sync after reconnect failed: {e}")
+            await self._send_telegram(
+                f"⚠️ <b>WebSocket Reconnected</b>\n"
+                f"\n"
+                f"Connection restored but REST sync failed: {str(e)[:100]}\n"
+                f"Manual verification recommended."
+            )
 
     def _setup_signal_handlers(self) -> None:
         """
@@ -1122,6 +1367,12 @@ class TradeApp:
                     logger.info("Shutdown event detected")
                     break
 
+                # Проверяем Circuit Breaker
+                if self.circuit_breaker.is_open:
+                    logger.warning("Circuit Breaker is OPEN - trading paused")
+                    await asyncio.sleep(60)  # Ждём cooldown
+                    continue
+
                 self._cycle_count += 1
                 logger.info(f"")
                 logger.info(f"{'=' * 40}")
@@ -1129,6 +1380,10 @@ class TradeApp:
                 logger.info(f"{'=' * 40}")
 
                 await self._run_cycle(symbols)
+
+                # Обновляем Health Checker после успешного цикла
+                self.health_checker.record_cycle_completed()
+                self.circuit_breaker.record_success()
 
                 # Периодический вывод статистики
                 if self.stats_interval > 0 and self._cycle_count % self.stats_interval == 0:
@@ -1158,6 +1413,9 @@ class TradeApp:
                 break
             except Exception as e:
                 logger.exception(f"Error in main loop: {e}")
+                # Записываем ошибку в circuit breaker и health checker
+                self.circuit_breaker.record_error("CYCLE_ERROR", str(e))
+                self.health_checker.record_error()
                 await self._send_telegram(f"<b>ERROR</b>\n{str(e)[:200]}")
                 await asyncio.sleep(60)  # Пауза при ошибке
 
@@ -1167,11 +1425,37 @@ class TradeApp:
         end = datetime.now(timezone.utc)
         start = end - timedelta(days=30)
 
-        # 2. Скачиваем данные
+        # 2. Скачиваем данные с timeout (FIX #15)
         logger.info("[1/4] Downloading data...")
-        history = self.downloader.download_with_coinalyze_backfill(
-            symbols, start, end
-        )
+        try:
+            # Синхронная функция в отдельном потоке с timeout 60s
+            history = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self.downloader.download_with_coinalyze_backfill,
+                    symbols, start, end
+                ),
+                timeout=60.0  # Минимальный разумный timeout для download
+            )
+        except asyncio.TimeoutError:
+            logger.error("Download timeout (60s) - skipping this cycle")
+            return
+
+        # 2.5. Применяем REGIME FILTER (фильтрация символов по корреляции и dominance)
+        filtered_symbols = symbols
+        if self.regime_filter_enabled:
+            filtered_symbols, regime_result = self.regime_filter.filter_symbols_live(symbols)
+            if regime_result:
+                logger.info(
+                    f"[REGIME] {regime_result.regime} | "
+                    f"Corr={regime_result.avg_correlation:.2f} | "
+                    f"DomChange={regime_result.dominance_change_pct:+.1f}% | "
+                    f"Symbols: {regime_result.symbols_before} -> {regime_result.symbols_after}"
+                )
+                if not filtered_symbols:
+                    logger.warning("Regime filter removed all symbols - skipping cycle")
+                    return
+            else:
+                logger.warning("Regime filter failed - using all symbols")
 
         # 3. Генерируем сигналы для каждой стратегии
         logger.info("[2/4] Generating signals...")
@@ -1192,8 +1476,8 @@ class TradeApp:
                     output_dir='output',
                 )
 
-                # Генерируем сигналы
-                signals = runner.generate_signals(history, symbols, dedup_days=self.dedup_days)
+                # Генерируем сигналы (используем filtered_symbols после regime filter)
+                signals = runner.generate_signals(history, filtered_symbols, dedup_days=self.dedup_days)
 
                 # Фильтруем только сегодняшние сигналы
                 today = datetime.now(timezone.utc).date()
@@ -1204,6 +1488,12 @@ class TradeApp:
 
                 if today_signals:
                     logger.info(f"  {strat_name}: {len(today_signals)} signals today")
+                    for sig in today_signals:
+                        direction_icon = "🟢" if sig.direction == "LONG" else "🔴"
+                        logger.info(
+                            f"    {direction_icon} {sig.symbol} {sig.direction} | "
+                            f"entry={sig.entry:.4f} SL={sig.stop_loss:.4f} TP={sig.take_profit:.4f}"
+                        )
                     all_signals.extend(today_signals)
 
             except Exception as e:
@@ -1250,13 +1540,13 @@ class TradeApp:
 
                 # === LATE SIGNAL CHECK (skip signals for today if past threshold hour) ===
                 if self.late_signal_skip_after_utc is not None:
-                    now_utc = datetime.utcnow()
+                    now_utc = datetime.now(timezone.utc)
                     # Signal date = day the candle closed (00:00 UTC)
                     # If it's past threshold hour and signal is for today → stale
                     if signal.date.date() == now_utc.date() and now_utc.hour >= self.late_signal_skip_after_utc:
                         logger.debug(
-                            f"SKIP {signal.symbol}: late signal "
-                            f"(signal={signal.date.date()}, now={now_utc.hour}:{now_utc.minute:02d} UTC >= {self.late_signal_skip_after_utc}:00 UTC)"
+                            f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: late signal "
+                            f"(now={now_utc.hour}:{now_utc.minute:02d} UTC >= {self.late_signal_skip_after_utc}:00 UTC)"
                         )
                         skipped_late_signal += 1
                         continue
@@ -1268,7 +1558,7 @@ class TradeApp:
                 executed_signal_ids = self.trade_engine.get_executed_signal_ids()
                 if signal.signal_id in executed_signal_ids:
                     logger.debug(
-                        f"SKIP {signal.symbol}: signal_id={signal.signal_id} already executed"
+                        f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: already executed (id={signal.signal_id})"
                     )
                     skipped_duplicate += 1
                     continue
@@ -1284,7 +1574,7 @@ class TradeApp:
                         if self.month_off_pnl is not None and m_pnl < self.month_off_pnl:
                             skip_month = True
                         if skip_month:
-                            logger.debug(f"SKIP {signal.symbol}: month={signal_month}, {strategy_name} stats: pnl={m_pnl}%, dd={m_dd}%")
+                            logger.debug(f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: month={signal_month} stats: pnl={m_pnl}%, dd={m_dd}%")
                             skipped_month_filter += 1
                             continue
 
@@ -1299,7 +1589,7 @@ class TradeApp:
                         if self.day_off_pnl is not None and d_pnl < self.day_off_pnl:
                             skip_day = True
                         if skip_day:
-                            logger.debug(f"SKIP {signal.symbol}: day={signal_day}, {strategy_name} stats: pnl={d_pnl}%, dd={d_dd}%")
+                            logger.debug(f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: day={signal_day} stats: pnl={d_pnl}%, dd={d_dd}%")
                             skipped_day_filter += 1
                             continue
 
@@ -1317,7 +1607,7 @@ class TradeApp:
                     if self.position_mode == "single":
                         # single: только 1 позиция на монету
                         if symbol_positions:
-                            logger.debug(f"SKIP {signal.symbol}: position_mode=single, already has position")
+                            logger.debug(f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: position_mode=single, already has position")
                             skipped_position += 1
                             continue
                     elif self.position_mode == "direction":
@@ -1328,7 +1618,7 @@ class TradeApp:
                                (signal.direction == "SHORT" and p.side.value == "SHORT")
                         ]
                         if direction_positions:
-                            logger.debug(f"SKIP {signal.symbol}: position_mode=direction, already has {signal.direction}")
+                            logger.debug(f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: position_mode=direction, already has {signal.direction}")
                             skipped_position += 1
                             continue
 
@@ -1352,14 +1642,14 @@ class TradeApp:
                         # VOL LOW filter
                         if self.vol_filter_low_enabled and vol_low is not None:
                             if coin_vol < vol_low:
-                                logger.debug(f"SKIP {signal.symbol}: vol {coin_vol:.1f}% < {vol_low}% (too quiet)")
+                                logger.debug(f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: vol {coin_vol:.1f}% < {vol_low}% (too quiet)")
                                 skipped_vol_low += 1
                                 continue
 
                         # VOL HIGH filter
                         if self.vol_filter_high_enabled and vol_high is not None:
                             if coin_vol > vol_high:
-                                logger.debug(f"SKIP {signal.symbol}: vol {coin_vol:.1f}% > {vol_high}% (too chaotic)")
+                                logger.debug(f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: vol {coin_vol:.1f}% > {vol_high}% (too chaotic)")
                                 skipped_vol_high += 1
                                 continue
 
@@ -1396,7 +1686,7 @@ class TradeApp:
                                 )
 
                                 if not prediction.should_trade:
-                                    logger.debug(f"SKIP {signal.symbol}: ML filtered (conf={prediction.confidence:.2f}, score={prediction.filter_score:.2f})")
+                                    logger.debug(f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: ML filtered (conf={prediction.confidence:.2f}, score={prediction.filter_score:.2f})")
                                     skipped_ml += 1
                                     continue
                     except Exception as e:
@@ -1420,26 +1710,28 @@ class TradeApp:
                             regime_action = regime_actions.get(strategy_name, "FULL")
 
                             if regime_action == "OFF":
-                                logger.debug(f"SKIP {signal.symbol}: regime={coin_regime}, strategy={strategy_name} -> OFF")
+                                logger.debug(f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: coin_regime={coin_regime} -> OFF")
                                 skipped_regime += 1
                                 continue
                             elif regime_action == "DYN":
                                 regime_dynamic += 1
-                                logger.debug(f"DYN SIZE {signal.symbol}: regime={coin_regime}, strategy={strategy_name}")
+                                logger.debug(f"DYN SIZE {signal.symbol} {signal.direction} [{strategy_name}]: coin_regime={coin_regime}")
 
-                # === DYNAMIC SIZING ===
+                # === DYNAMIC SIZING (GEN SETUP style) ===
                 if self.dynamic_size_enabled:
-                    if self._last_trade_was_win:
-                        order_size = self.order_size_usd  # Normal = order_size_usd
+                    with self._dynamic_size_lock:
+                        last_win = self._last_trade_was_win
+                    if last_win:
+                        order_size = self.order_size_usd  # Normal size
                     else:
-                        order_size = self.protected_size
-                        logger.info(f"Using protected size ${order_size} after loss")
+                        order_size = self.order_size_usd / self.protected_size  # Divided by divisor
+                        logger.info(f"GEN-SETUP: ${self.order_size_usd} / {self.protected_size} = ${order_size:.0f} (after loss)")
                 else:
                     order_size = self.order_size_usd
 
-                # Если regime_action = DYN, используем protected_size
+                # Если regime_action = DYN, используем reduced size
                 if regime_action == "DYN":
-                    order_size = self.protected_size if self.dynamic_size_enabled else 1.0
+                    order_size = self.order_size_usd / self.protected_size if self.dynamic_size_enabled else 1.0
 
                 # === EXECUTE SIGNAL ===
                 position = await self.trade_engine.execute_signal(
@@ -1452,9 +1744,8 @@ class TradeApp:
                     executed += 1
                     # Отправляем alert в Telegram
                     await self._send_signal_alert(signal, position, order_size)
-                    # КРИТИЧНО: Сохраняем состояние сразу после открытия позиции
-                    # Защита от crash - signal_id и strategy будут сохранены
-                    self.state_manager.save_state()
+                    # FIX #6: save_state() теперь вызывается внутри execute_signal
+                    # через callback on_state_changed - защита от crash
 
             except Exception as e:
                 logger.error(f"Failed to execute signal {signal.signal_id}: {e}")
@@ -1682,8 +1973,8 @@ def main():
     # Dynamic Sizing
     parser.add_argument("--dynamic-size", action="store_true",
                         help="Enable dynamic sizing (protected after loss)")
-    parser.add_argument("--protected-size", type=float, default=100.0,
-                        help="Order size after LOSS (default: 100, after WIN = --order-size)")
+    parser.add_argument("--protected-size", type=float, default=10.0,
+                        help="Divisor for loss size: order_size / divisor (default: 10, e.g. $1000/10=$100)")
 
     # Month/Day Filters (uses MONTH_DATA/DAY_DATA from strategy_runner.py)
     parser.add_argument("--month-off-dd", type=float, default=None,
@@ -1735,6 +2026,10 @@ def main():
     # === LATE SIGNAL PROTECTION ===
     parser.add_argument("--late-signal-skip-after", type=int, default=3,
                         help="Skip signals for today if current hour UTC > X (default: 3, -1 to disable)")
+
+    # === REGIME FILTER ===
+    parser.add_argument("--regime-filter", action="store_true",
+                        help="Enable regime filter (BTC_ONLY/ALT_ONLY/MIXED based on correlation and BTC dominance)")
 
     args = parser.parse_args()
 
@@ -1850,6 +2145,8 @@ def main():
         trailing_stop_use_instead_of_tp=trailing_stop_use_instead_of_tp,
         # Late Signal Protection
         late_signal_skip_after_utc=args.late_signal_skip_after if args.late_signal_skip_after >= 0 else None,
+        # Regime Filter
+        regime_filter_enabled=args.regime_filter,
     )
 
     # Run with proper shutdown handling

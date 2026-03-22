@@ -50,7 +50,7 @@ class MockSignal:
         self.entry = entry
         self.stop_loss = stop_loss
         self.take_profit = take_profit
-        self.date = date or datetime.utcnow()
+        self.date = date or datetime.now(timezone.utc)
         self.metadata = metadata or {"strategy": "test_strategy"}
 
 
@@ -75,7 +75,7 @@ class TestLateSignalProtection:
     def test_signal_is_late_after_threshold(self):
         """Signal for today should be skipped if current hour >= threshold."""
         # Signal date: today at 00:00 UTC (daily candle close)
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         signal = MockSignal(date=today)
 
         # Current time: 10:15 UTC (past threshold of 3:00)
@@ -94,7 +94,7 @@ class TestLateSignalProtection:
 
     def test_signal_not_late_before_threshold(self):
         """Signal for today should NOT be skipped if current hour < threshold."""
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         signal = MockSignal(date=today)
 
         # Current time: 02:30 UTC (before threshold of 3:00)
@@ -108,7 +108,7 @@ class TestLateSignalProtection:
 
     def test_signal_not_late_if_different_day(self):
         """Signal for yesterday should NOT be skipped (different date)."""
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         yesterday = today - timedelta(days=1)
         signal = MockSignal(date=yesterday)
 
@@ -127,7 +127,7 @@ class TestLateSignalProtection:
         late_signal_skip_after_utc = None
 
         # Even if it's 10:00 UTC and signal is for today, should NOT skip
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         signal = MockSignal(date=today)
         now = today.replace(hour=10, minute=0)
 
@@ -143,7 +143,7 @@ class TestLateSignalProtection:
 
     def test_different_threshold_values(self):
         """Test with different threshold values (1, 5, 12 hours)."""
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         signal = MockSignal(date=today)
 
         test_cases = [
@@ -488,7 +488,7 @@ class TestFilterStatistics:
         threshold = 3
         current_hour = 10  # Past threshold
 
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
         for i in range(signals_today):
             signal = MockSignal(
@@ -598,7 +598,7 @@ class TestIntegration:
         """Late signal check should happen BEFORE dynamic sizing calculation."""
         # This ensures we don't waste time calculating size for signals we'll skip
 
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         signal = MockSignal(date=today, symbol="BTCUSDT")
 
         late_signal_skip_after_utc = 3
@@ -630,7 +630,7 @@ class TestIntegration:
         # Late signal should be checked before position mode
         # This is more efficient (no need to query positions for stale signals)
 
-        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         signal = MockSignal(date=today, symbol="BTCUSDT")
 
         # Counters

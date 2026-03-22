@@ -15,7 +15,7 @@ TradeEngine.execute_signal():
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from typing import Optional, Dict, Any, List
 import uuid
@@ -50,6 +50,27 @@ logger = logging.getLogger(__name__)
 AlertCallback = Callable[[str, str, Dict[str, Any]], None]  # (level, message, details)
 
 
+def _safe_int_order_id(order_id: str) -> Optional[int]:
+    """
+    Безопасно преобразовать order_id/algo_id в int.
+
+    FIX: Защита от ValueError при нечисловых или пустых значениях.
+
+    Args:
+        order_id: Строковое представление ID ордера
+
+    Returns:
+        int если успешно, None если невозможно преобразовать
+    """
+    if not order_id or not order_id.strip():
+        return None
+    try:
+        return int(order_id)
+    except (ValueError, TypeError):
+        logger.warning(f"Invalid order_id format: '{order_id}' (expected numeric string)")
+        return None
+
+
 class TradeEngine:
     """
     Trade Engine - исполняет сигналы на реальной бирже.
@@ -69,6 +90,9 @@ class TradeEngine:
         trailing_stop_callback_rate: float = 1.0,
         trailing_stop_activation_pct: Optional[float] = None,
         trailing_stop_use_instead_of_tp: bool = True,
+        # === SL/TP CONFIG (для расчёта от реального entry) ===
+        sl_pct: float = 4.0,
+        tp_pct: float = 10.0,
     ):
         """
         Инициализация Trade Engine.
@@ -94,8 +118,16 @@ class TradeEngine:
         self.trailing_stop_activation_pct = trailing_stop_activation_pct
         self.trailing_stop_use_instead_of_tp = trailing_stop_use_instead_of_tp
 
+        # SL/TP Config (для расчёта от реального entry)
+        self.sl_pct = sl_pct
+        self.tp_pct = tp_pct
+
         # Хранилище позиций
         self.positions: Dict[str, Position] = {}  # position_id -> Position
+
+        # Locks для защиты от race condition при открытии позиций
+        # Ключ = symbol, значение = asyncio.Lock
+        self._symbol_locks: Dict[str, asyncio.Lock] = {}
 
         # Position Manager (устанавливается извне)
         self.position_manager = None
@@ -103,6 +135,11 @@ class TradeEngine:
         # Callback для алертов (устанавливается извне)
         # on_alert(level, message, details) где level = "INFO", "WARNING", "ERROR", "CRITICAL"
         self.on_alert: Optional[AlertCallback] = None
+
+        # FIX #6: Callback для немедленного сохранения состояния после открытия позиции
+        # Защита от crash между execute_signal и save_state
+        # on_state_changed() - вызывается сразу после добавления позиции в positions dict
+        self.on_state_changed: Optional[Callable[[], None]] = None
 
         # Retry конфигурация
         self.sl_max_retries = 3  # Попытки для SL ордера
@@ -118,6 +155,17 @@ class TradeEngine:
         self.trailing_stop_failures = 0  # Trailing stop не удалось поставить
         self.emergency_closes = 0  # Экстренные закрытия
         self.partial_fills = 0   # Частичные исполнения entry
+
+    def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
+        """
+        Получить или создать Lock для символа.
+
+        Защищает от race condition при параллельном открытии позиций
+        на одном символе из разных coroutines.
+        """
+        if symbol not in self._symbol_locks:
+            self._symbol_locks[symbol] = asyncio.Lock()
+        return self._symbol_locks[symbol]
 
     async def execute_signal(
         self,
@@ -177,6 +225,33 @@ class TradeEngine:
         sl_price = Decimal("0")
         tp_price = Decimal("0")
 
+        # Защита от race condition: Lock на символ
+        # Гарантирует что только одна coroutine может открывать позицию на символе
+        async with self._get_symbol_lock(signal.symbol):
+            return await self._execute_signal_locked(
+                signal, size_usd, regime_action, entry_result, entry_price, entry_order_id,
+                quantity, exit_side, position_side, sl_price, tp_price
+            )
+
+    async def _execute_signal_locked(
+        self,
+        signal: Signal,
+        size_usd: float,
+        regime_action: str,
+        entry_result: Optional[Dict],
+        entry_price: Decimal,
+        entry_order_id: str,
+        quantity: Decimal,
+        exit_side: OrderSide,
+        position_side: PositionSide,
+        sl_price: Decimal,
+        tp_price: Decimal,
+    ) -> Optional[Position]:
+        """
+        Внутренняя реализация execute_signal, защищённая Lock'ом.
+
+        Вся логика открытия позиции здесь.
+        """
         try:
             # 1. Получаем текущую цену
             current_price = await self.exchange.get_price(signal.symbol)
@@ -193,11 +268,34 @@ class TradeEngine:
             if notional < min_notional:
                 # Добавляем step_size пока notional < 100
                 step_size = self.exchange.get_step_size(signal.symbol)
-                while quantity * current_price < min_notional:
+
+                # Защита от бесконечного цикла: step_size должен быть > 0
+                if step_size <= 0:
+                    logger.error(f"Invalid step_size={step_size} for {signal.symbol}, using fallback 0.001")
+                    step_size = Decimal("0.001")
+
+                # Ограничиваем количество итераций (защита от бесконечного цикла)
+                max_iterations = 1000
+                iterations = 0
+                while quantity * current_price < min_notional and iterations < max_iterations:
                     quantity += step_size
+                    iterations += 1
+
+                if iterations >= max_iterations:
+                    logger.error(f"Min notional adjustment reached max iterations for {signal.symbol}")
+
                 logger.info(f"Quantity adjusted for min notional: {quantity} (notional={quantity * current_price:.2f})")
 
             logger.info(f"Quantity: {quantity}")
+
+            # FIX #5: Check quantity > 0 after rounding
+            # After round_quantity(), quantity can become 0 if size_usd is too small
+            if quantity <= 0:
+                logger.error(
+                    f"Quantity is 0 after rounding for {signal.symbol}. "
+                    f"size_usd={size_usd}, price={current_price}, step_size={self.exchange.get_step_size(signal.symbol)}"
+                )
+                return None
 
             # 3. Устанавливаем leverage
             await self.exchange.set_leverage(signal.symbol, self.default_leverage)
@@ -246,6 +344,32 @@ class TradeEngine:
                 )
                 self.signals_skipped += 1
                 return None
+
+            # ===================================================================
+            # ПРОВЕРКА БАЛАНСА: Убедиться что хватит на entry + SL ордера
+            # ===================================================================
+            # Требуемая маржа = notional / leverage
+            # Добавляем 10% запас на комиссии и изменение цены
+            notional = quantity * current_price
+            required_margin = (notional / Decimal(str(self.default_leverage))) * Decimal("1.1")
+
+            available_balance = await self.exchange.get_balance("USDT")
+            if available_balance < required_margin:
+                logger.warning(
+                    f"SKIP {signal.symbol}: insufficient balance "
+                    f"(available={available_balance:.2f} USDT, required={required_margin:.2f} USDT)"
+                )
+                self._send_alert("WARNING", f"Insufficient balance for {signal.symbol}", {
+                    "signal_id": signal.signal_id,
+                    "available_balance": float(available_balance),
+                    "required_margin": float(required_margin),
+                    "notional": float(notional),
+                    "leverage": self.default_leverage,
+                })
+                self.signals_skipped += 1
+                return None
+
+            logger.info(f"Balance check OK: available={available_balance:.2f}, required={required_margin:.2f}")
 
             # 5. Открываем позицию (MARKET ордер)
             try:
@@ -314,6 +438,20 @@ class TradeEngine:
                     f"Position VERIFIED on exchange: qty={real_qty}, entryPrice={real_entry_price}"
                 )
 
+                # Проверка: позиция может быть в ответе но с qty=0 (закрыта)
+                if real_qty == 0:
+                    logger.error(
+                        f"Entry order placed but position qty=0: {signal.symbol}. "
+                        f"Position may have been immediately liquidated or closed."
+                    )
+                    self._send_alert("ERROR", f"Position qty=0 after entry: {signal.symbol}", {
+                        "signal_id": signal.signal_id,
+                        "order_id": entry_order_id,
+                        "note": "Position exists in response but qty=0. Check account.",
+                    })
+                    self.signals_skipped += 1
+                    return None
+
                 # Используем данные с биржи
                 executed_qty = real_qty
                 entry_price = real_entry_price if real_entry_price > 0 else Decimal(str(signal.entry))
@@ -371,9 +509,26 @@ class TradeEngine:
             # ===================================================================
 
             # 6. Ставим SL ордер через Algo Order API (КРИТИЧНО)
-            sl_price = self.exchange.round_price(
-                signal.symbol, Decimal(str(signal.stop_loss))
-            )
+            # SL считается от РЕАЛЬНОГО entry_price, не от signal.entry
+            if signal.direction == "SHORT":
+                sl_price_raw = entry_price * (Decimal("1") + Decimal(str(self.sl_pct / 100)))
+            else:
+                sl_price_raw = entry_price * (Decimal("1") - Decimal(str(self.sl_pct / 100)))
+            sl_price = self.exchange.round_price(signal.symbol, sl_price_raw)
+
+            # Защита: SL не может быть равен entry_price (биржа отклонит)
+            # Если после округления SL == entry, сдвигаем на один tick_size
+            if sl_price == entry_price:
+                tick_size = self.exchange.get_tick_size(signal.symbol)
+                if signal.direction == "SHORT":
+                    sl_price = entry_price + tick_size  # SL выше entry для SHORT
+                else:
+                    sl_price = entry_price - tick_size  # SL ниже entry для LONG
+                logger.warning(
+                    f"SL price adjusted to avoid entry collision: {sl_price} "
+                    f"(was {sl_price_raw} rounded to {entry_price})"
+                )
+
             sl_algo_id = ""  # Algo Order возвращает algoId, не orderId
             sl_client_id = f"SL_{signal.signal_id}"
             sl_success = False
@@ -392,7 +547,7 @@ class TradeEngine:
                 # Algo Order API возвращает algoId
                 sl_algo_id = str(sl_result.get("algoId", "")) if sl_result else ""
                 sl_success = bool(sl_algo_id)
-                logger.info(f"SL Algo order placed: algoId={sl_algo_id} triggerPrice={sl_price}")
+                logger.info(f"SL Algo order placed: algoId={sl_algo_id} triggerPrice={sl_price} ({self.sl_pct}% from entry={entry_price})")
 
             except BinanceError as e:
                 logger.error(f"SL Algo order FAILED: [{e.code}] {e.message}")
@@ -414,9 +569,12 @@ class TradeEngine:
                 return None
 
             # 7. Ставим TP / Trailing Stop (менее критично - SL защищает)
-            tp_price = self.exchange.round_price(
-                signal.symbol, Decimal(str(signal.take_profit))
-            )
+            # TP считается от РЕАЛЬНОГО entry_price, не от signal.entry
+            if signal.direction == "SHORT":
+                tp_price_raw = entry_price * (Decimal("1") - Decimal(str(self.tp_pct / 100)))
+            else:
+                tp_price_raw = entry_price * (Decimal("1") + Decimal(str(self.tp_pct / 100)))
+            tp_price = self.exchange.round_price(signal.symbol, tp_price_raw)
             tp_order_id = ""
             tp_client_id = f"TP_{signal.signal_id}"
             tp_success = False
@@ -498,7 +656,7 @@ class TradeEngine:
                     )
                     tp_order_id = str(tp_result.get("orderId", "")) if tp_result else ""
                     tp_success = bool(tp_order_id)
-                    logger.info(f"TP LIMIT order placed: orderId={tp_order_id} price={tp_price}")
+                    logger.info(f"TP LIMIT order placed: orderId={tp_order_id} price={tp_price} ({self.tp_pct}% from entry={entry_price})")
 
                 except BinanceError as e:
                     logger.error(f"TP order FAILED: [{e.code}] {e.message}")
@@ -534,7 +692,7 @@ class TradeEngine:
                 trailing_stop_enabled=trailing_stop_success,
                 trailing_stop_callback_rate=self.trailing_stop_callback_rate if trailing_stop_success else 0.0,
                 trailing_stop_activation_price=float(activation_price) if (trailing_stop_success and activation_price) else 0.0,
-                opened_at=datetime.utcnow(),
+                opened_at=datetime.now(timezone.utc),
                 strategy=signal.metadata.get("strategy", ""),
                 regime_action=regime_action,
                 max_hold_days=self.max_hold_days,
@@ -545,6 +703,15 @@ class TradeEngine:
             self.positions[position.position_id] = position
             self.signals_executed += 1
 
+            # FIX #6: Немедленно сохраняем состояние после добавления позиции
+            # Защита от crash - если crash после этой точки, позиция будет в state file
+            if self.on_state_changed:
+                try:
+                    self.on_state_changed()
+                except Exception as e:
+                    logger.error(f"State save callback failed: {e}")
+                    # Продолжаем работу - позиция на бирже, лучше иметь её без state чем не иметь
+
             # Регистрируем в Position Manager для мониторинга SL/TP/TrailingStop
             if self.position_manager:
                 self.position_manager.register_position(position)
@@ -553,6 +720,14 @@ class TradeEngine:
                 has_exit_order = tp_success or trailing_stop_success
                 if not has_exit_order:
                     self.position_manager.register_missing_tp(position)
+                    # Критичный alert - позиция без целей прибыли
+                    self._send_alert("WARNING", f"Position {signal.symbol} has NO TP/TRAILING", {
+                        "signal_id": signal.signal_id,
+                        "position_id": position.position_id,
+                        "entry_price": float(entry_price),
+                        "sl_price": float(sl_price),
+                        "note": "Position protected by SL only. Missing TP monitoring active (1 hour timeout).",
+                    })
 
             logger.info(f"Position opened: {position.position_id}")
             if trailing_stop_success:
@@ -717,10 +892,13 @@ class TradeEngine:
         try:
             # Отменяем SL ордер (Algo Order API)
             if position.sl_order_id:
-                await self.exchange.cancel_algo_order(
-                    symbol=position.symbol,
-                    algo_id=int(position.sl_order_id)
-                )
+                # FIX: Безопасное преобразование order_id в int
+                sl_algo_id = _safe_int_order_id(position.sl_order_id)
+                if sl_algo_id is not None:
+                    await self.exchange.cancel_algo_order(
+                        symbol=position.symbol,
+                        algo_id=sl_algo_id
+                    )
 
             # Отменяем TP ордер (обычный LIMIT ордер)
             if position.tp_order_id:
@@ -728,10 +906,13 @@ class TradeEngine:
 
             # Отменяем Trailing Stop если есть (Algo Order API)
             if position.trailing_stop_order_id:
-                await self.exchange.cancel_algo_order(
-                    symbol=position.symbol,
-                    algo_id=int(position.trailing_stop_order_id)
-                )
+                # FIX: Безопасное преобразование order_id в int
+                ts_algo_id = _safe_int_order_id(position.trailing_stop_order_id)
+                if ts_algo_id is not None:
+                    await self.exchange.cancel_algo_order(
+                        symbol=position.symbol,
+                        algo_id=ts_algo_id
+                    )
 
             # Закрываем позицию MARKET ордером
             exit_side = OrderSide.SELL if position.is_long else OrderSide.BUY
@@ -744,9 +925,11 @@ class TradeEngine:
                 reduce_only=True,
             )
 
-            position.status = PositionStatus.CLOSED
-            position.exit_reason = reason
-            position.closed_at = datetime.utcnow()
+            # Thread-safe закрытие позиции
+            was_closed = position.close_safe(exit_reason=reason)
+            if not was_closed:
+                logger.warning(f"Position {position_id} was already closed")
+                return False
 
             logger.info(f"Position {position_id} closed: {reason}")
             return True
@@ -768,6 +951,36 @@ class TradeEngine:
         исполняться повторно в тот же день.
         """
         return {p.signal_id for p in self.positions.values() if p.signal_id}
+
+    def cleanup_old_positions(self, max_age_days: int = 7) -> int:
+        """
+        Очистить старые закрытые позиции из памяти.
+
+        ВАЖНО: Сохраняем закрытые позиции на несколько дней для:
+        - Защиты от дубликатов сигналов (get_executed_signal_ids)
+        - Статистики и отладки
+
+        Args:
+            max_age_days: Удалять позиции закрытые более чем X дней назад
+
+        Returns:
+            Количество удалённых позиций
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+        to_delete = []
+
+        for pos_id, position in self.positions.items():
+            if not position.is_open and position.closed_at:
+                if position.closed_at < cutoff:
+                    to_delete.append(pos_id)
+
+        for pos_id in to_delete:
+            del self.positions[pos_id]
+
+        if to_delete:
+            logger.info(f"Cleaned up {len(to_delete)} old closed positions (older than {max_age_days} days)")
+
+        return len(to_delete)
 
     def get_stats(self) -> Dict[str, Any]:
         """Получить статистику."""

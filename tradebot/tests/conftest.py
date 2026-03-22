@@ -6,7 +6,7 @@ Fixtures are reusable test components that can be injected into test functions.
 """
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 from typing import Dict, Any
@@ -48,7 +48,7 @@ def sample_long_position() -> Position:
         entry_order_id="ORD_001",
         sl_order_id="ORD_002",
         tp_order_id="ORD_003",
-        opened_at=datetime.utcnow(),
+        opened_at=datetime.now(timezone.utc),
         strategy="momentum",
         max_hold_days=14,
     )
@@ -70,7 +70,7 @@ def sample_short_position() -> Position:
         entry_order_id="ORD_004",
         sl_order_id="ORD_005",
         tp_order_id="ORD_006",
-        opened_at=datetime.utcnow(),
+        opened_at=datetime.now(timezone.utc),
         strategy="reversal",
         max_hold_days=14,
     )
@@ -89,7 +89,7 @@ def expired_position() -> Position:
         stop_loss=48000.0,
         take_profit=55000.0,
         status=PositionStatus.OPEN,
-        opened_at=datetime.utcnow() - timedelta(days=15),  # 15 days ago
+        opened_at=datetime.now(timezone.utc) - timedelta(days=15),  # 15 days ago
         max_hold_days=14,
     )
 
@@ -110,8 +110,8 @@ def closed_position() -> Position:
         exit_price=55000.0,
         exit_reason="TP",
         realized_pnl=5.0,
-        opened_at=datetime.utcnow() - timedelta(days=2),
-        closed_at=datetime.utcnow(),
+        opened_at=datetime.now(timezone.utc) - timedelta(days=2),
+        closed_at=datetime.now(timezone.utc),
     )
 
 
@@ -166,10 +166,12 @@ def mock_exchange() -> MagicMock:
     exchange.get_balance = AsyncMock(return_value=Decimal("1000.0"))
     exchange.get_price = AsyncMock(return_value=Decimal("50000.0"))
     exchange.get_position = AsyncMock(return_value=None)
+    exchange.get_position_by_side = AsyncMock(return_value=None)
     exchange.get_all_positions = AsyncMock(return_value=[])
     exchange.get_open_orders = AsyncMock(return_value=[])
     exchange.set_leverage = AsyncMock(return_value=True)
     exchange.cancel_order = AsyncMock(return_value=True)
+    exchange.cancel_algo_order = AsyncMock(return_value=True)
     exchange.cancel_all_orders = AsyncMock(return_value=0)
     exchange.start_user_data_stream = AsyncMock(return_value=True)
     exchange.stop_user_data_stream = AsyncMock()
@@ -177,6 +179,11 @@ def mock_exchange() -> MagicMock:
     # Sync methods
     exchange.round_quantity = MagicMock(side_effect=lambda s, q: q)
     exchange.round_price = MagicMock(side_effect=lambda s, p: p)
+    exchange.get_step_size = MagicMock(return_value=Decimal("0.001"))
+    exchange.get_tick_size = MagicMock(return_value=Decimal("0.01"))
+
+    # Algo orders (SL STOP_MARKET, Trailing Stop)
+    exchange.get_open_algo_orders = AsyncMock(return_value=[])
 
     # Market order returns filled order data
     exchange.place_market_order = AsyncMock(return_value={
@@ -187,15 +194,21 @@ def mock_exchange() -> MagicMock:
         "origQty": "0.001",
     })
 
-    # Stop order returns order data
+    # Stop order returns algo order data (Algo Order API uses algoId)
     exchange.place_stop_order = AsyncMock(return_value={
-        "orderId": "987654321",
+        "algoId": "987654321",
         "status": "NEW",
     })
 
     # Take profit order returns order data
     exchange.place_take_profit_order = AsyncMock(return_value={
         "orderId": "456789123",
+        "status": "NEW",
+    })
+
+    # Trailing stop order returns algo order data
+    exchange.place_trailing_stop_order = AsyncMock(return_value={
+        "algoId": "111222333",
         "status": "NEW",
     })
 

@@ -142,6 +142,38 @@ class BinanceFuturesAdapter(ExchangeInterface):
         self._account_update_callback: Optional[AccountUpdateCallback] = None
         self._ws_running = False
 
+        # FIX #8: Callback для уведомления о reconnect WebSocket
+        # Используется для запуска REST sync после переподключения
+        # чтобы восстановить пропущенные события
+        self.on_ws_reconnected: Optional[Callable[[], Any]] = None
+
+        # Server time offset (local_time - server_time in ms)
+        # Used to correct timestamp in signed requests
+        self._time_offset: int = 0
+        self._time_sync_task: Optional[asyncio.Task] = None
+        self._time_sync_interval: int = 600  # 10 минут
+
+    def _create_task_with_handler(self, coro, name: str = "") -> asyncio.Task:
+        """
+        Create background task with exception handling.
+
+        FIX: asyncio.create_task exceptions are now logged instead of lost.
+        """
+        task = asyncio.create_task(coro, name=name)
+        task.add_done_callback(self._handle_task_exception)
+        return task
+
+    def _handle_task_exception(self, task: asyncio.Task) -> None:
+        """Handle exceptions from background tasks."""
+        try:
+            exc = task.exception()
+            if exc:
+                logger.error(
+                    f"Background task '{task.get_name()}' failed with exception: {exc}"
+                )
+        except asyncio.CancelledError:
+            pass  # Task was cancelled, not an error
+
     # =========================================================================
     # ИДЕНТИФИКАЦИЯ
     # =========================================================================
@@ -156,6 +188,16 @@ class BinanceFuturesAdapter(ExchangeInterface):
         """True если работаем на testnet."""
         return self._testnet
 
+    @property
+    def is_connected(self) -> bool:
+        """True если подключены к бирже и exchange_info загружен."""
+        return self._connected and bool(self._symbol_info)
+
+    @property
+    def is_exchange_info_loaded(self) -> bool:
+        """True если exchange_info загружен."""
+        return bool(self._symbol_info)
+
     # =========================================================================
     # ПОДКЛЮЧЕНИЕ
     # =========================================================================
@@ -168,6 +210,9 @@ class BinanceFuturesAdapter(ExchangeInterface):
                 timeout = aiohttp.ClientTimeout(total=30)
                 self._session = aiohttp.ClientSession(timeout=timeout)
 
+            # Синхронизируем время с сервером (ВАЖНО: до любых signed запросов!)
+            await self._sync_server_time()
+
             # Загружаем exchange info
             await self._load_exchange_info()
 
@@ -175,6 +220,12 @@ class BinanceFuturesAdapter(ExchangeInterface):
             hedge_ok = await self.ensure_hedge_mode()
             if not hedge_ok:
                 logger.error("Failed to enable Hedge Mode - trading may fail!")
+
+            # Запускаем периодическую синхронизацию времени (каждые 10 мин)
+            if self._time_sync_task is None or self._time_sync_task.done():
+                self._time_sync_task = self._create_task_with_handler(
+                    self._periodic_time_sync(), name="time_sync"
+                )
 
             self._connected = True
             logger.info(
@@ -189,6 +240,15 @@ class BinanceFuturesAdapter(ExchangeInterface):
 
     async def disconnect(self) -> None:
         """Отключиться от биржи."""
+        # Останавливаем периодическую синхронизацию времени
+        if self._time_sync_task and not self._time_sync_task.done():
+            self._time_sync_task.cancel()
+            try:
+                await self._time_sync_task
+            except asyncio.CancelledError:
+                pass
+            self._time_sync_task = None
+
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
@@ -235,6 +295,51 @@ class BinanceFuturesAdapter(ExchangeInterface):
             }
 
         logger.info(f"Loaded {len(self._symbol_info)} symbols")
+
+    async def _sync_server_time(self) -> None:
+        """
+        Синхронизировать локальное время с сервером Binance.
+
+        Вычисляет offset между локальным временем и сервером.
+        Это необходимо для подписанных запросов, которые требуют
+        timestamp в пределах 1000ms от серверного времени.
+        """
+        url = f"{self._base_url}/fapi/v1/time"
+        try:
+            local_before = int(time.time() * 1000)
+            async with self._session.get(url) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    server_time = data.get("serverTime", 0)
+                    local_after = int(time.time() * 1000)
+
+                    # Берём среднее локальное время (учитываем latency)
+                    local_avg = (local_before + local_after) // 2
+
+                    # Offset: на сколько мы впереди/позади сервера
+                    self._time_offset = server_time - local_avg
+
+                    logger.info(
+                        f"Time sync: server={server_time}, local={local_avg}, "
+                        f"offset={self._time_offset}ms"
+                    )
+                else:
+                    logger.warning(f"Failed to sync time: HTTP {resp.status}")
+        except Exception as e:
+            logger.warning(f"Failed to sync server time: {e}")
+            # Продолжаем без коррекции - возможно локальное время точное
+
+    async def _periodic_time_sync(self) -> None:
+        """Фоновая задача для периодической синхронизации времени (каждые 10 мин)."""
+        while True:
+            try:
+                await asyncio.sleep(self._time_sync_interval)
+                await self._sync_server_time()
+            except asyncio.CancelledError:
+                logger.debug("Periodic time sync task cancelled")
+                break
+            except Exception as e:
+                logger.warning(f"Periodic time sync error: {e}")
 
     async def ensure_hedge_mode(self) -> bool:
         """
@@ -720,6 +825,84 @@ class BinanceFuturesAdapter(ExchangeInterface):
             logger.error(f"Failed to get open Algo orders: [{e.code}] {e.message}")
             return []
 
+    async def get_order_details(
+        self,
+        symbol: str,
+        order_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Получить детали ордера по ID.
+
+        GET /fapi/v1/order
+
+        Используется для получения информации об исполненных ордерах (TP).
+
+        Args:
+            symbol: Торговая пара
+            order_id: ID ордера
+
+        Returns:
+            Детали ордера или None если не найден:
+            - orderId, symbol, side, positionSide
+            - type, status (FILLED, CANCELED, etc)
+            - origQty, executedQty, avgPrice
+            - time, updateTime
+        """
+        endpoint = "/fapi/v1/order"
+        params = {
+            "symbol": symbol,
+            "orderId": order_id,
+        }
+
+        try:
+            data = await self._signed_request("GET", endpoint, params)
+            return data
+        except BinanceError as e:
+            if e.code == -2013:  # Order does not exist
+                logger.debug(f"Order {order_id} not found for {symbol}")
+            else:
+                logger.warning(f"Failed to get order {order_id}: [{e.code}] {e.message}")
+            return None
+
+    async def get_algo_order_details(
+        self,
+        symbol: str,
+        algo_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Получить детали Algo ордера по algoId.
+
+        GET /fapi/v1/algoOrder
+
+        Используется для получения информации об исполненных Algo ордерах (SL, Trailing).
+
+        Args:
+            symbol: Торговая пара
+            algo_id: Algo ID ордера
+
+        Returns:
+            Детали ордера или None если не найден:
+            - algoId, clientAlgoId
+            - symbol, side, positionSide
+            - orderType, algoStatus (FILLED, CANCELLED, etc)
+            - quantity, executedQty, avgPrice, triggerPrice
+        """
+        endpoint = "/fapi/v1/algoOrder"
+        params = {
+            "symbol": symbol,
+            "algoId": algo_id,
+        }
+
+        try:
+            data = await self._signed_request("GET", endpoint, params)
+            return data
+        except BinanceError as e:
+            if e.code == -2013:  # Order does not exist
+                logger.debug(f"Algo order {algo_id} not found for {symbol}")
+            else:
+                logger.warning(f"Failed to get Algo order {algo_id}: [{e.code}] {e.message}")
+            return None
+
     # =========================================================================
     # ПОЗИЦИИ
     # =========================================================================
@@ -823,9 +1006,18 @@ class BinanceFuturesAdapter(ExchangeInterface):
         return self._symbol_info.get(symbol, {})
 
     def round_quantity(self, symbol: str, quantity: Decimal) -> Decimal:
-        """Округлить количество по правилам биржи."""
+        """
+        Округлить количество по правилам биржи.
+
+        ВАЖНО: Требует предварительного вызова connect() для загрузки exchange_info.
+        """
         info = self._symbol_info.get(symbol)
         if not info:
+            # FIX: Логируем предупреждение если exchange_info не загружен
+            logger.warning(
+                f"round_quantity({symbol}): symbol_info not loaded, returning unrounded value. "
+                f"Make sure connect() was called before trading."
+            )
             return quantity
 
         step_size = info["step_size"]
@@ -833,21 +1025,63 @@ class BinanceFuturesAdapter(ExchangeInterface):
         return (quantity // step_size) * step_size
 
     def get_step_size(self, symbol: str) -> Decimal:
-        """Получить step_size для символа."""
+        """
+        Получить step_size для символа (минимальный шаг количества).
+
+        ВАЖНО: Требует предварительного вызова connect() для загрузки exchange_info.
+        """
         info = self._symbol_info.get(symbol)
         if not info:
+            # FIX: Логируем предупреждение если exchange_info не загружен
+            logger.warning(
+                f"get_step_size({symbol}): symbol_info not loaded, using fallback 0.001. "
+                f"Make sure connect() was called before trading."
+            )
             return Decimal("0.001")  # Default fallback
         return info["step_size"]
 
-    def round_price(self, symbol: str, price: Decimal) -> Decimal:
-        """Округлить цену по правилам биржи."""
+    def get_tick_size(self, symbol: str) -> Decimal:
+        """
+        Получить tick_size для символа (минимальный шаг цены).
+
+        ВАЖНО: Требует предварительного вызова connect() для загрузки exchange_info.
+        """
         info = self._symbol_info.get(symbol)
         if not info:
+            # FIX: Логируем предупреждение если exchange_info не загружен
+            logger.warning(
+                f"get_tick_size({symbol}): symbol_info not loaded, using fallback 0.01. "
+                f"Make sure connect() was called before trading."
+            )
+            return Decimal("0.01")  # Default fallback
+        return info["tick_size"]
+
+    def round_price(self, symbol: str, price: Decimal) -> Decimal:
+        """
+        Округлить цену по правилам биржи (tick_size).
+
+        Используем Decimal.quantize() для точного округления без floating point ошибок.
+        ROUND_DOWN гарантирует что SL/TP цены будут в допустимом диапазоне.
+
+        ВАЖНО: Требует предварительного вызова connect() для загрузки exchange_info.
+        """
+        info = self._symbol_info.get(symbol)
+        if not info:
+            # FIX: Логируем предупреждение если exchange_info не загружен
+            logger.warning(
+                f"round_price({symbol}): symbol_info not loaded, returning unrounded price. "
+                f"Make sure connect() was called before trading."
+            )
             return price
 
         tick_size = info["tick_size"]
-        # Округляем до tick_size
-        return (price // tick_size) * tick_size
+        if tick_size <= 0:
+            return price
+
+        # Определяем количество знаков после запятой из tick_size
+        # Например: tick_size=0.01 -> 2 знака, tick_size=0.0001 -> 4 знака
+        # quantize требует Decimal с нужным количеством знаков
+        return (price / tick_size).quantize(Decimal("1"), rounding=ROUND_DOWN) * tick_size
 
     # =========================================================================
     # LEVERAGE
@@ -889,39 +1123,49 @@ class BinanceFuturesAdapter(ExchangeInterface):
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        """Выполнить подписанный запрос."""
-        if params is None:
-            params = {}
+        """Выполнить подписанный запрос с автоматическим retry при -1021."""
+        original_params = params.copy() if params else {}
 
-        # Добавляем timestamp
-        params["timestamp"] = int(time.time() * 1000)
+        for attempt in range(2):  # Максимум 1 retry после resync
+            params = original_params.copy()
 
-        # Подписываем
-        params["signature"] = self._sign(params)
+            # Добавляем timestamp с коррекцией на server offset
+            params["timestamp"] = int(time.time() * 1000) + self._time_offset
 
-        url = f"{self._base_url}{endpoint}"
-        headers = {"X-MBX-APIKEY": self._api_key}
+            # Подписываем
+            params["signature"] = self._sign(params)
 
-        if method == "GET":
-            async with self._session.get(
-                url, params=params, headers=headers
-            ) as resp:
-                return await self._handle_response(resp)
+            url = f"{self._base_url}{endpoint}"
+            headers = {"X-MBX-APIKEY": self._api_key}
 
-        elif method == "POST":
-            async with self._session.post(
-                url, params=params, headers=headers
-            ) as resp:
-                return await self._handle_response(resp)
+            try:
+                if method == "GET":
+                    async with self._session.get(
+                        url, params=params, headers=headers
+                    ) as resp:
+                        return await self._handle_response(resp)
 
-        elif method == "DELETE":
-            async with self._session.delete(
-                url, params=params, headers=headers
-            ) as resp:
-                return await self._handle_response(resp)
+                elif method == "POST":
+                    async with self._session.post(
+                        url, params=params, headers=headers
+                    ) as resp:
+                        return await self._handle_response(resp)
 
-        else:
-            raise ValueError(f"Unknown method: {method}")
+                elif method == "DELETE":
+                    async with self._session.delete(
+                        url, params=params, headers=headers
+                    ) as resp:
+                        return await self._handle_response(resp)
+
+                else:
+                    raise ValueError(f"Unknown method: {method}")
+
+            except AuthError as e:
+                # -1021: Timestamp error - retry после resync (уже выполнен в _handle_response)
+                if e.code == -1021 and attempt == 0:
+                    logger.info("Retrying request after time resync...")
+                    continue
+                raise
 
     async def _handle_response(self, resp: aiohttp.ClientResponse) -> Any:
         """
@@ -939,6 +1183,11 @@ class BinanceFuturesAdapter(ExchangeInterface):
             # Обрабатываем IP Ban
             if isinstance(error, IPBanError):
                 self._handle_ip_ban(error)
+
+            # Обрабатываем ошибку timestamp (-1021) - немедленный ресинк
+            if error.code == -1021:
+                logger.warning("Timestamp error -1021 detected, resyncing time...")
+                await self._sync_server_time()
 
             # Обрабатываем критические ошибки
             if error.is_critical:
@@ -1209,19 +1458,29 @@ class BinanceFuturesAdapter(ExchangeInterface):
             ws_url = f"{self._ws_base_url}/{self._listen_key}"
             logger.info(f"Connecting to User Data Stream: {ws_url[:50]}...")
 
+            # FIX #14: Увеличиваем ping timeout для медленных сетей
+            # 30s interval, 20s timeout - минимальные разумные значения
+            # FIX: Добавляем timeouts для connect чтобы избежать зависания
             self._ws = await websockets.connect(
                 ws_url,
-                ping_interval=20,
-                ping_timeout=10,
+                ping_interval=30,
+                ping_timeout=20,
+                open_timeout=30,   # Timeout для установки соединения
+                close_timeout=10,  # Timeout для закрытия соединения
             )
 
             self._ws_running = True
 
+            # FIX: Используем helper с exception handling
             # Запускаем обработчик сообщений
-            self._ws_task = asyncio.create_task(self._ws_message_loop())
+            self._ws_task = self._create_task_with_handler(
+                self._ws_message_loop(), name="ws_message_loop"
+            )
 
             # Запускаем keepalive (каждые 30 минут)
-            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+            self._keepalive_task = self._create_task_with_handler(
+                self._keepalive_loop(), name="ws_keepalive"
+            )
 
             logger.info("User Data Stream started")
             return True
@@ -1354,6 +1613,7 @@ class BinanceFuturesAdapter(ExchangeInterface):
             "executedQty": order_data.get("z", "0"),
             "avgPrice": order_data.get("ap", "0"),
             "lastFilledPrice": order_data.get("L", "0"),
+            "realizedPnl": order_data.get("rp", "0"),  # Realized profit
             "eventType": "ORDER_TRADE_UPDATE",
         }
 
@@ -1397,22 +1657,38 @@ class BinanceFuturesAdapter(ExchangeInterface):
 
         algo_status = order_data.get("X", "")
 
-        # Игнорируем промежуточные статусы
-        if algo_status in ("TRIGGERING", "FINISHED"):
-            logger.debug(f"Ignoring transitional algo status: {algo_status}")
+        # =====================================================================
+        # ALGO_UPDATE статусы (по документации Binance):
+        # - NEW: Ордер создан, ещё не сработал
+        # - TRIGGERING: Условие сработало, передаётся в matching engine
+        # - TRIGGERED: Передан в matching engine (ещё НЕ исполнен!)
+        # - FINISHED: Исполнен ИЛИ отменён в matching engine (ФИНАЛЬНЫЙ!)
+        # - CANCELED: Отменён вручную
+        # - REJECTED: Отклонён matching engine
+        # - EXPIRED: Отменён системой
+        # =====================================================================
+
+        # Игнорируем промежуточные статусы (ордер ещё не завершён)
+        if algo_status in ("NEW", "TRIGGERING", "TRIGGERED"):
+            logger.debug(f"Ignoring intermediate algo status: {algo_status}")
             return
 
-        # Маппинг статусов Algo → стандартные
-        # TRIGGERED = SL сработал (позиция закрыта по SL)
-        status_mapping = {
-            "NEW": "NEW",
-            "TRIGGERED": "FILLED",  # SL сработал!
-            "CANCELED": "CANCELED",
-            "REJECTED": "CANCELED",
-            "EXPIRED": "EXPIRED",
-        }
+        # Определяем финальный статус
+        executed_qty = float(order_data.get("aq", 0) or 0)
 
-        mapped_status = status_mapping.get(algo_status, algo_status)
+        if algo_status == "FINISHED":
+            # FINISHED = исполнен ИЛИ отменён
+            # Проверяем executedQty чтобы понять что произошло
+            if executed_qty > 0:
+                mapped_status = "FILLED"
+            else:
+                mapped_status = "CANCELED"
+        elif algo_status in ("CANCELED", "REJECTED", "EXPIRED"):
+            mapped_status = "CANCELED"
+        else:
+            # Неизвестный статус - логируем и пропускаем
+            logger.warning(f"Unknown algo status: {algo_status}")
+            return
 
         algo_id = order_data.get("aid")
         if algo_id is None:
@@ -1421,7 +1697,7 @@ class BinanceFuturesAdapter(ExchangeInterface):
 
         # Парсим информацию
         order_info = {
-            "orderId": algo_id,  # Используем algoId как orderId
+            "orderId": algo_id,  # Используем algoId как orderId для совместимости
             "algoId": algo_id,
             "clientOrderId": order_data.get("caid", ""),
             "clientAlgoId": order_data.get("caid", ""),
@@ -1433,6 +1709,7 @@ class BinanceFuturesAdapter(ExchangeInterface):
             "algoStatus": algo_status,
             "origQty": order_data.get("q", "0"),
             "executedQty": order_data.get("aq", "0"),
+            "avgPrice": order_data.get("ap", "0"),  # Average fill price
             "triggerPrice": order_data.get("tp", "0"),
             "rejectReason": order_data.get("rm", ""),
             "eventType": "ALGO_UPDATE",
@@ -1443,10 +1720,17 @@ class BinanceFuturesAdapter(ExchangeInterface):
                 f"Algo order REJECTED: algoId={algo_id}, reason={order_info['rejectReason']}"
             )
 
-        logger.info(
-            f"Algo update: {order_info['symbol']} {order_info['type']} "
-            f"algoStatus={algo_status} → {mapped_status}"
-        )
+        # Логируем с деталями исполнения
+        if mapped_status == "FILLED":
+            logger.info(
+                f"Algo FILLED: {order_info['symbol']} {order_info['type']} "
+                f"algoId={algo_id} qty={order_info['executedQty']} @ {order_info['avgPrice']}"
+            )
+        else:
+            logger.info(
+                f"Algo update: {order_info['symbol']} {order_info['type']} "
+                f"algoStatus={algo_status} → {mapped_status}"
+            )
 
         try:
             self._order_update_callback(order_info)
@@ -1465,12 +1749,15 @@ class BinanceFuturesAdapter(ExchangeInterface):
             except Exception as e:
                 logger.error(f"Keepalive error: {e}")
 
-    async def _reconnect_ws(self) -> None:
-        """Переподключиться к WebSocket."""
+    async def _reconnect_ws(self, max_retries: int = 10) -> None:
+        """
+        Переподключиться к WebSocket с retry и exponential backoff.
+
+        КРИТИЧНО: Если reconnect не удастся, все WebSocket события потеряны.
+        Поэтому используем агрессивную стратегию retry.
+        """
         if not self._ws_running:
             return
-
-        logger.info("Reconnecting User Data Stream...")
 
         # Закрываем текущее соединение
         if self._ws:
@@ -1478,27 +1765,58 @@ class BinanceFuturesAdapter(ExchangeInterface):
                 await self._ws.close()
             except Exception:
                 pass
+            self._ws = None
 
-        # Ждём перед переподключением
-        await asyncio.sleep(5)
+        # Retry с exponential backoff
+        for attempt in range(max_retries):
+            if not self._ws_running:
+                return
 
-        # Создаём новый listenKey и подключаемся
-        try:
-            await self.create_listen_key()
-            ws_url = f"{self._ws_base_url}/{self._listen_key}"
-            self._ws = await websockets.connect(
-                ws_url,
-                ping_interval=20,
-                ping_timeout=10,
-            )
-            logger.info("User Data Stream reconnected")
+            delay = min(5 * (2 ** attempt), 300)  # 5s, 10s, 20s, ... max 5min
+            logger.info(f"Reconnecting User Data Stream (attempt {attempt + 1}/{max_retries}, delay {delay}s)...")
 
-            # Перезапускаем обработчик сообщений
-            self._ws_task = asyncio.create_task(self._ws_message_loop())
+            await asyncio.sleep(delay)
 
-        except Exception as e:
-            logger.error(f"Reconnect failed: {e}")
-            # Пробуем снова через 30 секунд
-            await asyncio.sleep(30)
-            if self._ws_running:
-                await self._reconnect_ws()
+            try:
+                # Создаём новый listenKey и подключаемся
+                await self.create_listen_key()
+                ws_url = f"{self._ws_base_url}/{self._listen_key}"
+                # FIX #14: Увеличиваем ping timeout для медленных сетей
+                # FIX: Добавляем timeouts для connect чтобы избежать зависания
+                self._ws = await websockets.connect(
+                    ws_url,
+                    ping_interval=30,
+                    ping_timeout=20,
+                    open_timeout=30,   # Timeout для установки соединения
+                    close_timeout=10,  # Timeout для закрытия соединения
+                )
+                logger.info("User Data Stream reconnected successfully")
+
+                # FIX: Используем helper с exception handling
+                # Перезапускаем обработчик сообщений
+                self._ws_task = self._create_task_with_handler(
+                    self._ws_message_loop(), name="ws_message_loop"
+                )
+
+                # FIX #8: Вызываем callback для REST sync после reconnect
+                # Во время disconnect могли пропасть события - восстанавливаем состояние
+                if self.on_ws_reconnected:
+                    try:
+                        result = self.on_ws_reconnected()
+                        # Если callback вернул coroutine - запускаем его
+                        if asyncio.iscoroutine(result):
+                            self._create_task_with_handler(result, name="ws_reconnect_callback")
+                        logger.info("WebSocket reconnect callback triggered")
+                    except Exception as e:
+                        logger.error(f"WebSocket reconnect callback error: {e}")
+
+                return  # Успешно переподключились
+
+            except Exception as e:
+                logger.error(f"Reconnect attempt {attempt + 1} failed: {e}")
+
+        # Все попытки исчерпаны
+        logger.critical(
+            f"CRITICAL: Failed to reconnect WebSocket after {max_retries} attempts. "
+            f"All position updates will be missed! Manual intervention required."
+        )

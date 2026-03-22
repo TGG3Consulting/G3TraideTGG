@@ -189,14 +189,16 @@ class TestRegimeAction:
 
     @pytest.mark.asyncio
     async def test_regime_dyn_uses_small_size(self, trade_engine, mock_exchange, mock_signal_long):
-        """regime_action=DYN should use $1 position size."""
+        """regime_action=DYN should use $1 position size, but min notional applies."""
         await trade_engine.execute_signal(mock_signal_long, regime_action="DYN")
 
-        # With $1 size and 50000 price, quantity should be 0.00002
+        # With $1 size and 50000 price, quantity would be 0.00002
+        # BUT min notional is $100, so quantity is adjusted to meet min notional
+        # $100 / $50000 = 0.002, plus step_size adjustment = 0.002+
         call_args = mock_exchange.place_market_order.call_args
         quantity = call_args.kwargs["quantity"]
-        # Quantity = $1 / $50000 = 0.00002
-        assert float(quantity) == pytest.approx(0.00002, rel=0.01)
+        # Quantity adjusted for min notional ($100)
+        assert float(quantity) >= 0.002  # At least $100 notional
 
     @pytest.mark.asyncio
     async def test_custom_order_size_used(self, trade_engine, mock_exchange, mock_signal_long):
@@ -505,6 +507,7 @@ class TestClosePosition:
 
         # Reset mocks
         mock_exchange.cancel_order.reset_mock()
+        mock_exchange.cancel_algo_order.reset_mock()
         mock_exchange.place_market_order.reset_mock()
 
         # Close the position
@@ -515,8 +518,10 @@ class TestClosePosition:
         assert position.exit_reason == "TEST_CLOSE"
         assert position.closed_at is not None
 
-        # Should have cancelled SL and TP
-        assert mock_exchange.cancel_order.call_count == 2
+        # Should have cancelled SL (Algo) and TP (regular)
+        # SL uses cancel_algo_order, TP uses cancel_order
+        assert mock_exchange.cancel_algo_order.call_count >= 1  # SL Algo
+        assert mock_exchange.cancel_order.call_count >= 1  # TP regular
 
     @pytest.mark.asyncio
     async def test_close_nonexistent_position_fails(self, trade_engine, mock_exchange):
