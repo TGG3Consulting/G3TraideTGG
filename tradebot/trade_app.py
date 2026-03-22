@@ -52,6 +52,7 @@ from .engine.circuit_breaker import CircuitBreaker, ErrorSeverity
 from .engine.health_checker import HealthChecker
 from .adapters import BinanceFuturesAdapter
 from .core.models import Position
+from .config import PairsConfigLoader, PairConfig
 
 # Импорт фильтров из strategy_runner
 from strategy_runner import (
@@ -463,6 +464,41 @@ class TradeApp:
         self.regime_filter_enabled = regime_filter_enabled
         self.regime_filter = RegimeFilter(enabled=regime_filter_enabled)
 
+        # === PER-PAIR CONFIG ===
+        self.pairs_loader = PairsConfigLoader()
+        self.pairs_loader.load()
+        # Apply CLI overrides (CLI args have highest priority)
+        self.pairs_loader.apply_cli_overrides(
+            order_size=order_size_usd,
+            leverage=leverage,
+            sl=sl_pct,
+            tp=tp_pct,
+            max_hold=max_hold_days,
+            trailing_stop=trailing_stop_enabled,
+            trailing_callback=trailing_stop_callback_rate,
+            trailing_activation=trailing_stop_activation_pct,
+            trailing_with_tp=not trailing_stop_use_instead_of_tp,
+            coin_regime=coin_regime_enabled,
+            coin_regime_lookback=coin_regime_lookback,
+            vol_filter_low=vol_filter_low_enabled,
+            vol_filter_high=vol_filter_high_enabled,
+            # NOTE: regime_filter is NOT passed here intentionally!
+            # self.regime_filter_enabled is GLOBAL switch (enable filter)
+            # pair_config.filters.regime_filter_enabled is PER-PAIR (participate in filter)
+            # They have different semantics and should not be mixed.
+            dedup_days=dedup_days,
+            position_mode=position_mode,
+            late_signal_skip_after=late_signal_skip_after_utc,
+            dynamic_size=dynamic_size_enabled,
+            protected_size=protected_size,
+            ml=use_ml,
+            ml_model_dir=ml_model_dir,
+            month_off_dd=month_off_dd,
+            month_off_pnl=month_off_pnl,
+            day_off_dd=day_off_dd,
+            day_off_pnl=day_off_pnl,
+        )
+
         # === RISK MANAGEMENT ===
         self.daily_max_dd = daily_max_dd
         self.monthly_max_dd = monthly_max_dd
@@ -570,11 +606,29 @@ class TradeApp:
         logger.info("=" * 60)
         logger.info(f"Mode:        {'TESTNET' if self.testnet else 'MAINNET'}")
         logger.info(f"Strategies:  {len(self.strategies)}: {', '.join(self.strategies)}")
+        logger.info(f"Interval:    {self.interval_sec}s")
+
+        # === PER-PAIR CONFIG INFO ===
+        configured_symbols = self.pairs_loader.get_all_configured_symbols()
+        if configured_symbols:
+            logger.info(f"Pairs Config: {len(configured_symbols)} pairs with custom config")
+            for sym in configured_symbols:
+                pc = self.pairs_loader.get_pair_config(sym)
+                status = "ENABLED" if pc.enabled else "DISABLED"
+                ts_info = f"TS={pc.trailing_stop.callback_rate}%" if pc.trailing_stop.enabled else "no-TS"
+                logger.info(
+                    f"  {sym}: ${pc.trading.order_size_usd} {pc.trading.leverage}x "
+                    f"SL={pc.trading.sl_pct}% TP={pc.trading.tp_pct}% {ts_info} [{status}]"
+                )
+        else:
+            logger.info(f"Pairs Config: No custom pairs (using defaults)")
+
+        # === DEFAULT VALUES (for pairs without custom config) ===
+        logger.info(f"--- DEFAULTS (CLI/fallback) ---")
         logger.info(f"Order Size:  ${self.order_size_usd}")
         logger.info(f"Leverage:    {self.leverage}x")
         logger.info(f"SL/TP:       {self.sl_pct}% / {self.tp_pct}%")
         logger.info(f"Max Hold:    {self.max_hold_days} days")
-        logger.info(f"Interval:    {self.interval_sec}s")
         logger.info(f"Dedup Days:  {self.dedup_days}")
         logger.info(f"Position:    {self.position_mode}")
         logger.info(f"Coin Regime: {'ENABLED (' + str(self.coin_regime_lookback) + 'd)' if self.coin_regime_enabled else 'Disabled'}")
@@ -1440,61 +1494,92 @@ class TradeApp:
             logger.error("Download timeout (60s) - skipping this cycle")
             return
 
-        # 2.5. Применяем REGIME FILTER (фильтрация символов по корреляции и dominance)
-        filtered_symbols = symbols
-        if self.regime_filter_enabled:
-            filtered_symbols, regime_result = self.regime_filter.filter_symbols_live(symbols)
-            if regime_result:
-                logger.info(
-                    f"[REGIME] {regime_result.regime} | "
-                    f"Corr={regime_result.avg_correlation:.2f} | "
-                    f"DomChange={regime_result.dominance_change_pct:+.1f}% | "
-                    f"Symbols: {regime_result.symbols_before} -> {regime_result.symbols_after}"
-                )
-                if not filtered_symbols:
-                    logger.warning("Regime filter removed all symbols - skipping cycle")
-                    return
-            else:
-                logger.warning("Regime filter failed - using all symbols")
+        # 2.5. Фильтруем по pairs.json (enabled=false)
+        filtered_symbols = self.pairs_loader.get_enabled_symbols(symbols)
+        if len(filtered_symbols) < len(symbols):
+            disabled_count = len(symbols) - len(filtered_symbols)
+            logger.info(f"[PAIRS] Filtered out {disabled_count} disabled symbols from pairs.json")
 
-        # 3. Генерируем сигналы для каждой стратегии
+        # 2.6. Применяем REGIME FILTER (фильтрация символов по корреляции и dominance)
+        if self.regime_filter_enabled:
+            # Separate symbols that have regime_filter_enabled=false (excluded from filtering)
+            regime_filter_symbols = []
+            regime_excluded_symbols = []
+            for sym in filtered_symbols:
+                pc = self.pairs_loader.get_pair_config(sym)
+                if pc.filters.regime_filter_enabled:
+                    regime_filter_symbols.append(sym)
+                else:
+                    regime_excluded_symbols.append(sym)
+
+            if regime_filter_symbols:
+                regime_filtered, regime_result = self.regime_filter.filter_symbols_live(regime_filter_symbols)
+                if regime_result:
+                    logger.info(
+                        f"[REGIME] {regime_result.regime} | "
+                        f"Corr={regime_result.avg_correlation:.2f} | "
+                        f"DomChange={regime_result.dominance_change_pct:+.1f}% | "
+                        f"Symbols: {regime_result.symbols_before} -> {regime_result.symbols_after}"
+                    )
+                    # Combine regime-filtered symbols with excluded symbols
+                    filtered_symbols = regime_filtered + regime_excluded_symbols
+                    if regime_excluded_symbols:
+                        logger.info(f"[REGIME] {len(regime_excluded_symbols)} symbols excluded from regime filter (per-pair config)")
+                else:
+                    logger.warning("Regime filter failed - using all symbols")
+            else:
+                logger.info("[REGIME] All symbols excluded from regime filter (per-pair config)")
+
+            if not filtered_symbols:
+                logger.warning("No symbols left after regime filter - skipping cycle")
+                return
+
+        # 3. Генерируем сигналы для каждой стратегии с per-pair config
         logger.info("[2/4] Generating signals...")
         all_signals = []
 
-        config = StrategyConfig(
-            sl_pct=self.sl_pct,
-            tp_pct=self.tp_pct,
-            max_hold_days=self.max_hold_days,
-            lookback=7,
-        )
-
         for strat_name in self.strategies:
             try:
-                runner = StrategyRunner(
-                    strategy_name=strat_name,
-                    config=config,
-                    output_dir='output',
-                )
+                # Per-pair signal generation: generate for each symbol with its config
+                for symbol in filtered_symbols:
+                    pair_config = self.pairs_loader.get_pair_config(symbol)
 
-                # Генерируем сигналы (используем filtered_symbols после regime filter)
-                signals = runner.generate_signals(history, filtered_symbols, dedup_days=self.dedup_days)
+                    # Skip if strategy not enabled for this pair
+                    if not pair_config.is_strategy_enabled(strat_name):
+                        continue
 
-                # Фильтруем только сегодняшние сигналы
-                today = datetime.now(timezone.utc).date()
-                today_signals = [
-                    s for s in signals
-                    if s.date.date() == today
-                ]
+                    # Build StrategyConfig with pair-specific thresholds
+                    config = StrategyConfig(
+                        sl_pct=pair_config.trading.sl_pct,
+                        tp_pct=pair_config.trading.tp_pct,
+                        max_hold_days=pair_config.trading.max_hold_days,
+                        lookback=7,
+                        params=pair_config.to_strategy_config_params(strat_name),
+                    )
 
-                if today_signals:
-                    logger.info(f"  {strat_name}: {len(today_signals)} signals today")
-                    for sig in today_signals:
-                        direction_icon = "🟢" if sig.direction == "LONG" else "🔴"
-                        logger.info(
-                            f"    {direction_icon} {sig.symbol} {sig.direction} | "
-                            f"entry={sig.entry:.4f} SL={sig.stop_loss:.4f} TP={sig.take_profit:.4f}"
-                        )
-                    all_signals.extend(today_signals)
+                    runner = StrategyRunner(
+                        strategy_name=strat_name,
+                        config=config,
+                        output_dir='output',
+                    )
+
+                    # Generate signals for single symbol
+                    signals = runner.generate_signals(
+                        history, [symbol], dedup_days=pair_config.filters.dedup_days
+                    )
+
+                    # Filter today's signals
+                    today = datetime.now(timezone.utc).date()
+                    today_signals = [s for s in signals if s.date.date() == today]
+
+                    if today_signals:
+                        for sig in today_signals:
+                            direction_icon = "🟢" if sig.direction == "LONG" else "🔴"
+                            logger.info(
+                                f"  {strat_name} {direction_icon} {sig.symbol} {sig.direction} | "
+                                f"entry={sig.entry:.4f} SL={sig.stop_loss:.4f} TP={sig.take_profit:.4f}"
+                            )
+                        all_signals.extend(today_signals)
 
             except Exception as e:
                 logger.error(f"Strategy {strat_name} error: {e}")
@@ -1538,15 +1623,19 @@ class TradeApp:
             try:
                 strategy_name = signal.metadata.get('strategy', 'unknown')
 
+                # === GET PER-PAIR CONFIG ===
+                pair_config = self.pairs_loader.get_pair_config(signal.symbol)
+
                 # === LATE SIGNAL CHECK (skip signals for today if past threshold hour) ===
-                if self.late_signal_skip_after_utc is not None:
+                late_skip = pair_config.filters.late_signal_skip_after
+                if late_skip is not None and late_skip >= 0:
                     now_utc = datetime.now(timezone.utc)
                     # Signal date = day the candle closed (00:00 UTC)
                     # If it's past threshold hour and signal is for today → stale
-                    if signal.date.date() == now_utc.date() and now_utc.hour >= self.late_signal_skip_after_utc:
+                    if signal.date.date() == now_utc.date() and now_utc.hour >= late_skip:
                         logger.debug(
                             f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: late signal "
-                            f"(now={now_utc.hour}:{now_utc.minute:02d} UTC >= {self.late_signal_skip_after_utc}:00 UTC)"
+                            f"(now={now_utc.hour}:{now_utc.minute:02d} UTC >= {late_skip}:00 UTC)"
                         )
                         skipped_late_signal += 1
                         continue
@@ -1564,14 +1653,16 @@ class TradeApp:
                     continue
 
                 # === MONTH FILTER (lookup from MONTH_DATA) ===
-                if self.month_off_dd is not None or self.month_off_pnl is not None:
+                month_off_dd = pair_config.time_filters.month_off_dd
+                month_off_pnl = pair_config.time_filters.month_off_pnl
+                if month_off_dd is not None or month_off_pnl is not None:
                     signal_month = signal.date.month  # 1-12
                     if strategy_name in MONTH_DATA and signal_month in MONTH_DATA[strategy_name]:
                         m_pnl, m_dd = MONTH_DATA[strategy_name][signal_month]
                         skip_month = False
-                        if self.month_off_dd is not None and m_dd < -self.month_off_dd:
+                        if month_off_dd is not None and m_dd < -month_off_dd:
                             skip_month = True
-                        if self.month_off_pnl is not None and m_pnl < self.month_off_pnl:
+                        if month_off_pnl is not None and m_pnl < month_off_pnl:
                             skip_month = True
                         if skip_month:
                             logger.debug(f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: month={signal_month} stats: pnl={m_pnl}%, dd={m_dd}%")
@@ -1579,14 +1670,16 @@ class TradeApp:
                             continue
 
                 # === DAY FILTER (lookup from DAY_DATA) ===
-                if self.day_off_dd is not None or self.day_off_pnl is not None:
+                day_off_dd = pair_config.time_filters.day_off_dd
+                day_off_pnl = pair_config.time_filters.day_off_pnl
+                if day_off_dd is not None or day_off_pnl is not None:
                     signal_day = signal.date.weekday()  # 0=Mon..6=Sun
                     if strategy_name in DAY_DATA and signal_day in DAY_DATA[strategy_name]:
                         d_pnl, d_dd = DAY_DATA[strategy_name][signal_day]
                         skip_day = False
-                        if self.day_off_dd is not None and d_dd < -self.day_off_dd:
+                        if day_off_dd is not None and d_dd < -day_off_dd:
                             skip_day = True
-                        if self.day_off_pnl is not None and d_pnl < self.day_off_pnl:
+                        if day_off_pnl is not None and d_pnl < day_off_pnl:
                             skip_day = True
                         if skip_day:
                             logger.debug(f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: day={signal_day} stats: pnl={d_pnl}%, dd={d_dd}%")
@@ -1596,7 +1689,8 @@ class TradeApp:
                 # === POSITION MODE CHECK ===
                 # ВАЖНО: Фильтруем по symbol + strategy, как в бэктестере
                 # Каждая стратегия может иметь свою позицию на одном символе
-                if self.position_mode != "multi":
+                position_mode = pair_config.filters.position_mode
+                if position_mode != "multi":
                     open_positions = self.trade_engine.get_open_positions()
                     # Фильтруем по символу И стратегии (как в backtester - каждая стратегия независима)
                     symbol_positions = [
@@ -1604,13 +1698,13 @@ class TradeApp:
                         if p.symbol == signal.symbol and p.strategy == strategy_name
                     ]
 
-                    if self.position_mode == "single":
+                    if position_mode == "single":
                         # single: только 1 позиция на монету
                         if symbol_positions:
                             logger.debug(f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: position_mode=single, already has position")
                             skipped_position += 1
                             continue
-                    elif self.position_mode == "direction":
+                    elif position_mode == "direction":
                         # direction: 1 LONG + 1 SHORT на монету
                         direction_positions = [
                             p for p in symbol_positions
@@ -1634,27 +1728,36 @@ class TradeApp:
                             daily_candles, signal.date, lookback=14
                         )
 
-                        # Получаем пороги для стратегии
+                        # Получаем пороги: per-pair > strategy default
                         vol_thresholds = VOL_FILTER_THRESHOLDS.get(strategy_name, {})
-                        vol_low = vol_thresholds.get('vol_low')
-                        vol_high = vol_thresholds.get('vol_high')
+                        # Per-pair threshold overrides strategy default
+                        vol_low = (
+                            pair_config.filters.vol_filter_low_threshold
+                            if pair_config.filters.vol_filter_low_threshold is not None
+                            else vol_thresholds.get('vol_low')
+                        )
+                        vol_high = (
+                            pair_config.filters.vol_filter_high_threshold
+                            if pair_config.filters.vol_filter_high_threshold is not None
+                            else vol_thresholds.get('vol_high')
+                        )
 
-                        # VOL LOW filter
-                        if self.vol_filter_low_enabled and vol_low is not None:
+                        # VOL LOW filter (use per-pair config)
+                        if pair_config.filters.vol_filter_low_enabled and vol_low is not None:
                             if coin_vol < vol_low:
                                 logger.debug(f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: vol {coin_vol:.1f}% < {vol_low}% (too quiet)")
                                 skipped_vol_low += 1
                                 continue
 
-                        # VOL HIGH filter
-                        if self.vol_filter_high_enabled and vol_high is not None:
+                        # VOL HIGH filter (use per-pair config)
+                        if pair_config.filters.vol_filter_high_enabled and vol_high is not None:
                             if coin_vol > vol_high:
                                 logger.debug(f"SKIP {signal.symbol} {signal.direction} [{strategy_name}]: vol {coin_vol:.1f}% > {vol_high}% (too chaotic)")
                                 skipped_vol_high += 1
                                 continue
 
                 # === ML FILTER ===
-                if self.use_ml and self.ml_filter is not None:
+                if pair_config.ml_filter.enabled and self.ml_filter is not None:
                     try:
                         # Build features for ML - simplified for LIVE
                         # ML filter in strategy_runner uses previous day's candle
@@ -1666,16 +1769,16 @@ class TradeApp:
                                 prev_candle = daily_candles[-2] if len(daily_candles) >= 2 else None
                                 candle = daily_candles[-1]
 
-                                # Build minimal features
+                                # Build minimal features (use per-pair SL/TP)
                                 features = {
                                     'Open': candle.open,
                                     'Prev High': prev_candle.high if prev_candle else 0,
                                     'Prev Low': prev_candle.low if prev_candle else 0,
                                     'Prev Close': prev_candle.close if prev_candle else 0,
                                     'Prev Volume': prev_candle.volume if prev_candle else 0,
-                                    'SL %': self.sl_pct,
-                                    'TP %': self.tp_pct,
-                                    'R:R Ratio': self.tp_pct / self.sl_pct if self.sl_pct > 0 else 0,
+                                    'SL %': pair_config.trading.sl_pct,
+                                    'TP %': pair_config.trading.tp_pct,
+                                    'R:R Ratio': pair_config.trading.tp_pct / pair_config.trading.sl_pct if pair_config.trading.sl_pct > 0 else 0,
                                 }
 
                                 prediction = self.ml_filter.predict(
@@ -1695,14 +1798,15 @@ class TradeApp:
                 # === COIN REGIME FILTER ===
                 regime_action = "FULL"
 
-                if self.coin_regime_enabled:
+                if pair_config.filters.coin_regime_enabled:
                     symbol_history = history.get(signal.symbol)
                     if symbol_history and symbol_history.klines:
                         daily_candles = StrategyRunner.aggregate_to_daily(symbol_history.klines)
+                        coin_regime_lookback = pair_config.filters.coin_regime_lookback
 
-                        if daily_candles and len(daily_candles) >= self.coin_regime_lookback:
+                        if daily_candles and len(daily_candles) >= coin_regime_lookback:
                             coin_regime = calculate_coin_regime(
-                                daily_candles, signal.date, lookback=self.coin_regime_lookback
+                                daily_candles, signal.date, lookback=coin_regime_lookback
                             )
 
                             # Получаем action из COIN_REGIME_MATRIX
@@ -1717,26 +1821,37 @@ class TradeApp:
                                 regime_dynamic += 1
                                 logger.debug(f"DYN SIZE {signal.symbol} {signal.direction} [{strategy_name}]: coin_regime={coin_regime}")
 
-                # === DYNAMIC SIZING (GEN SETUP style) ===
-                if self.dynamic_size_enabled:
+                # === DYNAMIC SIZING (GEN SETUP style) with per-pair config ===
+                base_order_size = pair_config.trading.order_size_usd
+                protected_size = pair_config.dynamic_size.protected_size
+
+                if pair_config.dynamic_size.enabled:
                     with self._dynamic_size_lock:
                         last_win = self._last_trade_was_win
                     if last_win:
-                        order_size = self.order_size_usd  # Normal size
+                        order_size = base_order_size  # Normal size
                     else:
-                        order_size = self.order_size_usd / self.protected_size  # Divided by divisor
-                        logger.info(f"GEN-SETUP: ${self.order_size_usd} / {self.protected_size} = ${order_size:.0f} (after loss)")
+                        order_size = base_order_size / protected_size  # Divided by divisor
+                        logger.info(f"GEN-SETUP: ${base_order_size} / {protected_size} = ${order_size:.0f} (after loss)")
                 else:
-                    order_size = self.order_size_usd
+                    order_size = base_order_size
 
                 # Если regime_action = DYN, используем reduced size
                 if regime_action == "DYN":
-                    order_size = self.order_size_usd / self.protected_size if self.dynamic_size_enabled else 1.0
+                    order_size = base_order_size / protected_size if pair_config.dynamic_size.enabled else 1.0
 
-                # === EXECUTE SIGNAL ===
+                # === EXECUTE SIGNAL with per-pair config ===
                 position = await self.trade_engine.execute_signal(
                     signal=signal,
                     order_size_usd=order_size,
+                    # Per-pair overrides for trailing stop
+                    trailing_stop_enabled=pair_config.trailing_stop.enabled,
+                    trailing_stop_callback_rate=pair_config.trailing_stop.callback_rate,
+                    trailing_stop_activation_pct=pair_config.trailing_stop.activation_pct,
+                    # Per-pair SL/TP
+                    sl_pct=pair_config.trading.sl_pct,
+                    tp_pct=pair_config.trading.tp_pct,
+                    leverage=pair_config.trading.leverage,
                     regime_action=regime_action,
                 )
 

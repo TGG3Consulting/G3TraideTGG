@@ -49,6 +49,14 @@ except ImportError:
     REGIME_FILTER_AVAILABLE = False
     RegimeFilter = None
 
+# Import PairsConfigLoader for per-pair config
+try:
+    from config import PairsConfigLoader
+    PAIRS_CONFIG_AVAILABLE = True
+except ImportError:
+    PAIRS_CONFIG_AVAILABLE = False
+    PairsConfigLoader = None
+
 # All available strategies
 ALL_STRATEGIES = ['ls_fade', 'momentum', 'reversal', 'mean_reversion', 'momentum_ls']
 
@@ -580,6 +588,9 @@ Examples:
     # Regime filter arguments
     parser.add_argument("--regime-filter", action="store_true",
                         help="Enable regime filter (BTC_ONLY/ALT_ONLY/MIXED based on correlation and BTC dominance)")
+    # Per-pair config
+    parser.add_argument("--pairs-config", type=str, default=None,
+                        help="Path to pairs.json for per-pair config (filters enabled/disabled pairs)")
 
     args = parser.parse_args()
 
@@ -620,6 +631,38 @@ Examples:
     if not symbols:
         print("[ERROR] No symbols provided")
         return 1
+
+    # Apply pairs.json filter if provided
+    pairs_loader = None
+    if args.pairs_config:
+        if not PAIRS_CONFIG_AVAILABLE:
+            print("[WARN] --pairs-config requested but PairsConfigLoader not available")
+        else:
+            from pathlib import Path
+            config_path = Path(args.pairs_config)
+            if not config_path.exists():
+                print(f"[ERROR] Pairs config file not found: {args.pairs_config}")
+                return 1
+
+            pairs_loader = PairsConfigLoader(config_path)
+            pairs_loader.load()
+
+            # Filter enabled symbols
+            original_count = len(symbols)
+            symbols = pairs_loader.get_enabled_symbols(symbols)
+            disabled_count = original_count - len(symbols)
+
+            if disabled_count > 0:
+                print(f"[PAIRS] Filtered out {disabled_count} disabled symbols from {args.pairs_config}")
+
+            # Show configured pairs
+            configured = pairs_loader.get_all_configured_symbols()
+            if configured:
+                print(f"[PAIRS] Custom config for: {', '.join(configured)}")
+
+            # Note: per-pair thresholds NOT used in backtest (requires loop restructure)
+            print(f"[PAIRS] NOTE: Per-pair thresholds NOT applied in backtest (use --sl/--tp for global)")
+            print()
 
     # Run all strategies
     results = run_all_strategies(

@@ -172,6 +172,13 @@ class TradeEngine:
         signal: Signal,
         order_size_usd: Optional[float] = None,
         regime_action: str = "FULL",
+        # === PER-PAIR OVERRIDES ===
+        trailing_stop_enabled: Optional[bool] = None,
+        trailing_stop_callback_rate: Optional[float] = None,
+        trailing_stop_activation_pct: Optional[float] = None,
+        sl_pct: Optional[float] = None,
+        tp_pct: Optional[float] = None,
+        leverage: Optional[int] = None,
     ) -> Optional[Position]:
         """
         Исполнить торговый сигнал.
@@ -187,6 +194,12 @@ class TradeEngine:
             signal: Signal объект из StrategyRunner.generate_signals()
             order_size_usd: Размер позиции в USD (или из regime_action)
             regime_action: FULL/DYN/OFF - влияет на размер
+            trailing_stop_enabled: Per-pair override (None = use instance default)
+            trailing_stop_callback_rate: Per-pair override (None = use instance default)
+            trailing_stop_activation_pct: Per-pair override (None = use instance default)
+            sl_pct: Per-pair override (None = use instance default)
+            tp_pct: Per-pair override (None = use instance default)
+            leverage: Per-pair override (None = use instance default)
 
         Returns:
             Position если успешно, None если ошибка или пропущен
@@ -204,6 +217,24 @@ class TradeEngine:
         else:  # FULL
             size_usd = order_size_usd or self.default_order_size_usd
 
+        # === RESOLVE PER-PAIR OVERRIDES ===
+        # Per-pair override > instance default
+        resolved_trailing_stop_enabled = (
+            trailing_stop_enabled if trailing_stop_enabled is not None
+            else self.trailing_stop_enabled
+        )
+        resolved_trailing_stop_callback_rate = (
+            trailing_stop_callback_rate if trailing_stop_callback_rate is not None
+            else self.trailing_stop_callback_rate
+        )
+        resolved_trailing_stop_activation_pct = (
+            trailing_stop_activation_pct if trailing_stop_activation_pct is not None
+            else self.trailing_stop_activation_pct
+        )
+        resolved_sl_pct = sl_pct if sl_pct is not None else self.sl_pct
+        resolved_tp_pct = tp_pct if tp_pct is not None else self.tp_pct
+        resolved_leverage = leverage if leverage is not None else self.default_leverage
+
         logger.info("=" * 60)
         logger.info(f"EXECUTING SIGNAL: {signal.signal_id}")
         logger.info("=" * 60)
@@ -214,6 +245,10 @@ class TradeEngine:
         logger.info(f"TP:         {signal.take_profit}")
         logger.info(f"Size USD:   ${size_usd}")
         logger.info(f"Action:     {regime_action}")
+        logger.info(f"Leverage:   {resolved_leverage}x")
+        logger.info(f"SL%:        {resolved_sl_pct}%")
+        logger.info(f"TP%:        {resolved_tp_pct}%")
+        logger.info(f"Trailing:   {resolved_trailing_stop_enabled} (cb={resolved_trailing_stop_callback_rate}%)")
 
         # Переменные для tracking
         entry_result = None
@@ -230,7 +265,14 @@ class TradeEngine:
         async with self._get_symbol_lock(signal.symbol):
             return await self._execute_signal_locked(
                 signal, size_usd, regime_action, entry_result, entry_price, entry_order_id,
-                quantity, exit_side, position_side, sl_price, tp_price
+                quantity, exit_side, position_side, sl_price, tp_price,
+                # Per-pair resolved parameters
+                resolved_trailing_stop_enabled,
+                resolved_trailing_stop_callback_rate,
+                resolved_trailing_stop_activation_pct,
+                resolved_sl_pct,
+                resolved_tp_pct,
+                resolved_leverage,
             )
 
     async def _execute_signal_locked(
@@ -246,11 +288,19 @@ class TradeEngine:
         position_side: PositionSide,
         sl_price: Decimal,
         tp_price: Decimal,
+        # Per-pair resolved parameters
+        resolved_trailing_stop_enabled: bool,
+        resolved_trailing_stop_callback_rate: float,
+        resolved_trailing_stop_activation_pct: Optional[float],
+        resolved_sl_pct: float,
+        resolved_tp_pct: float,
+        resolved_leverage: int,
     ) -> Optional[Position]:
         """
         Внутренняя реализация execute_signal, защищённая Lock'ом.
 
         Вся логика открытия позиции здесь.
+        Uses resolved per-pair parameters instead of instance defaults.
         """
         try:
             # 1. Получаем текущую цену
@@ -297,8 +347,8 @@ class TradeEngine:
                 )
                 return None
 
-            # 3. Устанавливаем leverage
-            await self.exchange.set_leverage(signal.symbol, self.default_leverage)
+            # 3. Устанавливаем leverage (per-pair resolved)
+            await self.exchange.set_leverage(signal.symbol, resolved_leverage)
 
             # 4. Определяем стороны
             if signal.direction == "LONG":
@@ -351,7 +401,7 @@ class TradeEngine:
             # Требуемая маржа = notional / leverage
             # Добавляем 10% запас на комиссии и изменение цены
             notional = quantity * current_price
-            required_margin = (notional / Decimal(str(self.default_leverage))) * Decimal("1.1")
+            required_margin = (notional / Decimal(str(resolved_leverage))) * Decimal("1.1")
 
             available_balance = await self.exchange.get_balance("USDT")
             if available_balance < required_margin:
@@ -364,7 +414,7 @@ class TradeEngine:
                     "available_balance": float(available_balance),
                     "required_margin": float(required_margin),
                     "notional": float(notional),
-                    "leverage": self.default_leverage,
+                    "leverage": resolved_leverage,
                 })
                 self.signals_skipped += 1
                 return None
@@ -510,10 +560,11 @@ class TradeEngine:
 
             # 6. Ставим SL ордер через Algo Order API (КРИТИЧНО)
             # SL считается от РЕАЛЬНОГО entry_price, не от signal.entry
+            # Uses per-pair resolved_sl_pct
             if signal.direction == "SHORT":
-                sl_price_raw = entry_price * (Decimal("1") + Decimal(str(self.sl_pct / 100)))
+                sl_price_raw = entry_price * (Decimal("1") + Decimal(str(resolved_sl_pct / 100)))
             else:
-                sl_price_raw = entry_price * (Decimal("1") - Decimal(str(self.sl_pct / 100)))
+                sl_price_raw = entry_price * (Decimal("1") - Decimal(str(resolved_sl_pct / 100)))
             sl_price = self.exchange.round_price(signal.symbol, sl_price_raw)
 
             # Защита: SL не может быть равен entry_price (биржа отклонит)
@@ -547,11 +598,43 @@ class TradeEngine:
                 # Algo Order API возвращает algoId
                 sl_algo_id = str(sl_result.get("algoId", "")) if sl_result else ""
                 sl_success = bool(sl_algo_id)
-                logger.info(f"SL Algo order placed: algoId={sl_algo_id} triggerPrice={sl_price} ({self.sl_pct}% from entry={entry_price})")
+                logger.info(f"SL Algo order placed: algoId={sl_algo_id} triggerPrice={sl_price} ({resolved_sl_pct}% from entry={entry_price})")
 
             except BinanceError as e:
                 logger.error(f"SL Algo order FAILED: [{e.code}] {e.message}")
                 self.sl_failures += 1
+                # Специальная обработка критических ошибок
+                if e.code == -2021:
+                    # ORDER_WOULD_IMMEDIATELY_TRIGGER - цена уже за SL!
+                    logger.critical(f"SL would trigger immediately - price already beyond SL level!")
+                elif e.code in (-2018, -2019):
+                    # BALANCE/MARGIN_NOT_SUFFICIENT
+                    logger.critical(f"Insufficient balance/margin for SL order")
+                elif e.code == -2023:
+                    # USER_IN_LIQUIDATION
+                    logger.critical(f"Account is being liquidated!")
+
+            except (asyncio.TimeoutError, TimeoutError) as e:
+                # КРИТИЧНО: Таймаут сети - позиция без SL!
+                logger.critical(f"SL placement TIMEOUT: {e} - position unprotected!")
+                self.sl_failures += 1
+                self._send_alert("CRITICAL", f"SL placement timeout for {signal.symbol}", {
+                    "signal_id": signal.signal_id,
+                    "error": str(e),
+                    "entry_price": float(entry_price),
+                    "sl_price": float(sl_price),
+                    "note": "Network timeout during SL placement. Position will be emergency closed.",
+                })
+
+            except (ConnectionError, OSError) as e:
+                # КРИТИЧНО: Сетевая ошибка - позиция без SL!
+                logger.critical(f"SL placement NETWORK ERROR: {e} - position unprotected!")
+                self.sl_failures += 1
+                self._send_alert("CRITICAL", f"SL placement network error for {signal.symbol}", {
+                    "signal_id": signal.signal_id,
+                    "error": str(e),
+                    "note": "Network error during SL placement. Position will be emergency closed.",
+                })
 
             # Если SL не удалось поставить - ЗАКРЫВАЕМ ПОЗИЦИЮ
             if not sl_success:
@@ -570,10 +653,11 @@ class TradeEngine:
 
             # 7. Ставим TP / Trailing Stop (менее критично - SL защищает)
             # TP считается от РЕАЛЬНОГО entry_price, не от signal.entry
+            # Uses per-pair resolved_tp_pct
             if signal.direction == "SHORT":
-                tp_price_raw = entry_price * (Decimal("1") - Decimal(str(self.tp_pct / 100)))
+                tp_price_raw = entry_price * (Decimal("1") - Decimal(str(resolved_tp_pct / 100)))
             else:
-                tp_price_raw = entry_price * (Decimal("1") + Decimal(str(self.tp_pct / 100)))
+                tp_price_raw = entry_price * (Decimal("1") + Decimal(str(resolved_tp_pct / 100)))
             tp_price = self.exchange.round_price(signal.symbol, tp_price_raw)
             tp_order_id = ""
             tp_client_id = f"TP_{signal.signal_id}"
@@ -582,17 +666,18 @@ class TradeEngine:
             trailing_stop_success = False
 
             # === TRAILING STOP (через Algo Order API) ===
-            if self.trailing_stop_enabled:
+            # Uses per-pair resolved parameters
+            if resolved_trailing_stop_enabled:
                 # Рассчитываем activation price если задан процент
                 activation_price = None
-                if self.trailing_stop_activation_pct is not None:
+                if resolved_trailing_stop_activation_pct is not None:
                     if signal.direction == "LONG":
                         activation_price = entry_price * (
-                            Decimal("1") + Decimal(str(self.trailing_stop_activation_pct / 100))
+                            Decimal("1") + Decimal(str(resolved_trailing_stop_activation_pct / 100))
                         )
                     else:
                         activation_price = entry_price * (
-                            Decimal("1") - Decimal(str(self.trailing_stop_activation_pct / 100))
+                            Decimal("1") - Decimal(str(resolved_trailing_stop_activation_pct / 100))
                         )
                     activation_price = self.exchange.round_price(signal.symbol, activation_price)
 
@@ -603,7 +688,7 @@ class TradeEngine:
                         symbol=signal.symbol,
                         side=exit_side,
                         quantity=quantity,
-                        callback_rate=self.trailing_stop_callback_rate,
+                        callback_rate=resolved_trailing_stop_callback_rate,
                         activation_price=activation_price,
                         position_side=position_side,
                         reduce_only=True,
@@ -617,7 +702,7 @@ class TradeEngine:
                     activation_info = f" (activation @ {activation_price})" if activation_price else " (immediate)"
                     logger.info(
                         f"Trailing stop Algo order placed: algoId={trailing_stop_algo_id} "
-                        f"callback={self.trailing_stop_callback_rate}%{activation_info}"
+                        f"callback={resolved_trailing_stop_callback_rate}%{activation_info}"
                     )
 
                 except BinanceError as e:
@@ -627,9 +712,22 @@ class TradeEngine:
                         "signal_id": signal.signal_id,
                         "error_code": e.code,
                         "error_message": e.message,
-                        "callback_rate": self.trailing_stop_callback_rate,
+                        "callback_rate": resolved_trailing_stop_callback_rate,
                         "note": "Will try to place regular TP instead.",
                     })
+
+                except (asyncio.TimeoutError, TimeoutError) as e:
+                    logger.error(f"Trailing stop TIMEOUT: {e} - will fallback to fixed TP")
+                    self.trailing_stop_failures += 1
+                    self._send_alert("WARNING", f"Trailing stop timeout for {signal.symbol}", {
+                        "signal_id": signal.signal_id,
+                        "error": str(e),
+                        "note": "Network timeout. Will try to place regular TP instead.",
+                    })
+
+                except (ConnectionError, OSError) as e:
+                    logger.error(f"Trailing stop NETWORK ERROR: {e} - will fallback to fixed TP")
+                    self.trailing_stop_failures += 1
 
                 except ValueError as e:
                     logger.error(f"Trailing stop validation error: {e}")
@@ -637,7 +735,7 @@ class TradeEngine:
 
             # === FIXED TP как LIMIT ордер ===
             place_fixed_tp = (
-                not self.trailing_stop_enabled or
+                not resolved_trailing_stop_enabled or
                 not trailing_stop_success or
                 not self.trailing_stop_use_instead_of_tp
             )
@@ -656,21 +754,39 @@ class TradeEngine:
                     )
                     tp_order_id = str(tp_result.get("orderId", "")) if tp_result else ""
                     tp_success = bool(tp_order_id)
-                    logger.info(f"TP LIMIT order placed: orderId={tp_order_id} price={tp_price} ({self.tp_pct}% from entry={entry_price})")
+                    logger.info(f"TP LIMIT order placed: orderId={tp_order_id} price={tp_price} ({resolved_tp_pct}% from entry={entry_price})")
 
                 except BinanceError as e:
                     logger.error(f"TP order FAILED: [{e.code}] {e.message}")
                     self.tp_failures += 1
-                    # Отправляем alert но НЕ закрываем - SL защищает
-                    self._send_alert("WARNING", f"TP order failed for {signal.symbol}", {
+                    # Специальная обработка: TP уже достигнут = закрыть по market
+                    if e.code == -2021:
+                        logger.info(f"TP would trigger immediately - price already at TP level, closing at market")
+                        # Не alert - это хорошая ситуация (уже в профите)
+                    else:
+                        # Отправляем alert но НЕ закрываем - SL защищает
+                        self._send_alert("WARNING", f"TP order failed for {signal.symbol}", {
+                            "signal_id": signal.signal_id,
+                            "error_code": e.code,
+                            "error_message": e.message,
+                            "entry_price": float(entry_price),
+                            "sl_price": float(sl_price),
+                            "tp_price": float(tp_price),
+                            "note": "Position protected by SL, but no TP. Will monitor for 1 hour.",
+                        })
+
+                except (asyncio.TimeoutError, TimeoutError) as e:
+                    logger.error(f"TP order TIMEOUT: {e} - position has SL protection")
+                    self.tp_failures += 1
+                    self._send_alert("WARNING", f"TP order timeout for {signal.symbol}", {
                         "signal_id": signal.signal_id,
-                        "error_code": e.code,
-                        "error_message": e.message,
-                        "entry_price": float(entry_price),
-                        "sl_price": float(sl_price),
-                        "tp_price": float(tp_price),
-                        "note": "Position protected by SL, but no TP. Will monitor for 1 hour.",
+                        "error": str(e),
+                        "note": "Network timeout. Position protected by SL, but no TP.",
                     })
+
+                except (ConnectionError, OSError) as e:
+                    logger.error(f"TP order NETWORK ERROR: {e} - position has SL protection")
+                    self.tp_failures += 1
 
             # 8. Создаём Position
             # ВАЖНО: SL и Trailing Stop используют algoId (Algo Order API)
@@ -690,7 +806,7 @@ class TradeEngine:
                 tp_order_id=tp_order_id if tp_success else "",  # orderId для TP (LIMIT)
                 trailing_stop_order_id=trailing_stop_algo_id if trailing_stop_success else "",  # algoId
                 trailing_stop_enabled=trailing_stop_success,
-                trailing_stop_callback_rate=self.trailing_stop_callback_rate if trailing_stop_success else 0.0,
+                trailing_stop_callback_rate=resolved_trailing_stop_callback_rate if trailing_stop_success else 0.0,
                 trailing_stop_activation_price=float(activation_price) if (trailing_stop_success and activation_price) else 0.0,
                 opened_at=datetime.now(timezone.utc),
                 strategy=signal.metadata.get("strategy", ""),
@@ -733,7 +849,7 @@ class TradeEngine:
             if trailing_stop_success:
                 logger.info(
                     f"Position {position.position_id} protected by TRAILING STOP "
-                    f"(callback={self.trailing_stop_callback_rate}%)"
+                    f"(callback={resolved_trailing_stop_callback_rate}%)"
                 )
             if tp_success:
                 logger.info(f"Position {position.position_id} protected by FIXED TP @ {tp_price}")

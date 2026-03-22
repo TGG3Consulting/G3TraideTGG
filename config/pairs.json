@@ -1,0 +1,125 @@
+{
+  "_schema_version": "1.0",
+  "_doc": {
+    "description": "Per-pair trading configuration. All pairs inherit from 'default' section.",
+    "enabled": "true = trade this pair, false = skip completely",
+    "strategies": "List of strategies to run for this pair (null = use default)",
+    "priority": "CLI args > pairs[SYMBOL] > default > hardcoded"
+  },
+
+  "default": {
+    "enabled": true,
+
+    "trading": {
+      "order_size_usd": 100.0,
+      "leverage": 10,
+      "sl_pct": 4.0,
+      "tp_pct": 10.0,
+      "max_hold_days": 14
+    },
+
+    "trailing_stop": {
+      "enabled": false,
+      "callback_rate": 1.0,
+      "activation_pct": null,
+      "with_tp": false
+    },
+
+    "strategies": ["ls_fade", "momentum", "reversal", "mean_reversion", "momentum_ls"],
+
+    "strategy_thresholds": {
+      "momentum_threshold": 5.0,
+      "ls_extreme": 0.65,
+      "oversold_threshold": -10.0,
+      "overbought_threshold": 15.0,
+      "crowd_bearish": 0.55,
+      "crowd_bullish": 0.60,
+      "ls_confirm": 0.60
+    },
+
+    "filters": {
+      "coin_regime_enabled": false,
+      "coin_regime_lookback": 14,
+      "vol_filter_low_enabled": false,
+      "vol_filter_high_enabled": false,
+      "vol_filter_low_threshold": null,
+      "vol_filter_high_threshold": null,
+      "regime_filter_enabled": true,
+      "dedup_days": 3,
+      "position_mode": "single",
+      "late_signal_skip_after": 3
+    },
+
+    "time_filters": {
+      "month_off_dd": null,
+      "month_off_pnl": null,
+      "day_off_dd": null,
+      "day_off_pnl": null
+    },
+
+    "dynamic_size": {
+      "enabled": false,
+      "protected_size": 10.0
+    },
+
+    "ml_filter": {
+      "enabled": false,
+      "model_dir": "models"
+    }
+  },
+
+  "pairs": {
+    "BTCUSDT": {
+      "enabled": true,
+      "trading": {
+        "order_size_usd": 1500,
+        "leverage": 10
+      },
+      "strategies": ["momentum"],
+      "strategy_thresholds": {
+        "momentum_threshold": 5.0
+      },
+      "filters": {
+        "vol_filter_low_threshold": 1.5,
+        "vol_filter_high_threshold": 6.0
+      },
+      "trailing_stop": {
+        "enabled": true,
+        "callback_rate": 0.3,
+        "activation_pct": 1.5
+      }
+    },
+
+    "XRPUSDT": {
+      "enabled": true,
+      "trading": {
+        "order_size_usd": 1500
+      },
+      "strategies": ["momentum"],
+      "strategy_thresholds": {
+        "momentum_threshold": 5.0
+      },
+      "trailing_stop": {
+        "enabled": true,
+        "callback_rate": 0.3,
+        "activation_pct": 1.5
+      }
+    },
+
+    "SOLUSDT": {
+      "enabled": true,
+      "trading": {
+        "order_size_usd": 1500
+      },
+      "strategies": ["momentum"],
+      "strategy_thresholds": {
+        "momentum_threshold": 0.0
+      },
+      "trailing_stop": {
+        "enabled": true,
+        "callback_rate": 0.3,
+        "activation_pct": 1.5
+      }
+    }
+  }
+}
